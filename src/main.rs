@@ -22,10 +22,12 @@ enum Commands {
         #[arg(value_enum)]
         side: Side,
     },
-    /// Send the focused window to a specific destination (left, right, or
-    /// center). `center` means "remove from whichever panel it's on and
-    /// return to the normal tiling tape". Unlike `toggle-window`, `send` is
-    /// not toggling: a window already on `target` stays there.
+    /// Send the focused window to a specific destination (left, right,
+    /// center, or floating). `center` removes from whichever panel is
+    /// tracking the window and un-floats it, returning it to the normal
+    /// niri tape. `floating` removes from panel tracking but leaves the
+    /// window floating exactly where it is. Unlike `toggle-window`, `send`
+    /// is not toggling: a window already on `target` stays there.
     Send {
         #[arg(value_enum)]
         target: Target,

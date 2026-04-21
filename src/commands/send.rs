@@ -1,6 +1,6 @@
 use crate::Ctx;
 use crate::commands::reorder;
-use crate::commands::togglewindow::{add_to_panel, remove_from_panel};
+use crate::commands::togglewindow::{add_to_panel, remove_to_floating, remove_to_tape};
 use crate::config::Side;
 use crate::niri::NiriClient;
 use crate::state::save_state;
@@ -10,22 +10,33 @@ use clap::ValueEnum;
 /// Where to send the focused window.
 ///
 /// `Left` / `Right` place the window on that panel (moving it across if it's
-/// currently on the other panel). `Center` removes it from whichever panel is
-/// tracking it and returns it to the regular niri tape.
+/// already on the other panel). `Center` un-floats the window and returns it
+/// to the niri tape — use this as the "put this back where it belongs" button.
+/// `Floating` detaches the window from panel tracking but leaves it floating
+/// exactly where it is, at its current size — useful for popping a window out
+/// of its slot without fully committing it back to the tape.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "lowercase")]
 pub enum Target {
     Left,
     Right,
     Center,
+    Floating,
+}
+
+enum Destination {
+    Panel(Side),
+    Tape,
+    Floating,
 }
 
 impl Target {
-    fn as_side(self) -> Option<Side> {
+    fn destination(self) -> Destination {
         match self {
-            Target::Left => Some(Side::Left),
-            Target::Right => Some(Side::Right),
-            Target::Center => None,
+            Target::Left => Destination::Panel(Side::Left),
+            Target::Right => Destination::Panel(Side::Right),
+            Target::Center => Destination::Tape,
+            Target::Floating => Destination::Floating,
         }
     }
 }
@@ -34,28 +45,30 @@ pub fn send<C: NiriClient>(ctx: &mut Ctx<C>, target: Target) -> Result<()> {
     let focused = ctx.socket.get_active_window()?;
     let current = ctx.state.side_of(focused.id);
 
-    match (current, target.as_side()) {
-        (Some(current_side), Some(target_side)) if current_side == target_side => {
+    match (current, target.destination()) {
+        (Some(current_side), Destination::Panel(target_side)) if current_side == target_side => {
             // Already on target panel — no state change.
         }
-        (Some(current_side), Some(target_side)) => {
-            // Panel → other panel.
-            remove_from_panel(ctx, current_side, &focused)?;
+        (Some(current_side), Destination::Panel(target_side)) => {
+            // Panel → other panel. add_to_panel will take over sizing, so just
+            // drop tracking on the source side without fighting a restore.
+            remove_to_floating(ctx, current_side, &focused)?;
             add_to_panel(ctx, target_side, &focused)?;
-            // remove_from_panel pushed the id into ignored_windows; undo that
-            // so the listener doesn't skip the add's follow-up events.
+            // The removal pushed the id into ignored_windows; undo so the
+            // listener doesn't skip the add's follow-up events.
             ctx.state.ignored_windows.retain(|id| *id != focused.id);
         }
-        (Some(current_side), None) => {
-            // Panel → center: just remove.
-            remove_from_panel(ctx, current_side, &focused)?;
+        (Some(current_side), Destination::Tape) => {
+            remove_to_tape(ctx, current_side, &focused)?;
         }
-        (None, Some(target_side)) => {
-            // Tape → panel: add.
+        (Some(current_side), Destination::Floating) => {
+            remove_to_floating(ctx, current_side, &focused)?;
+        }
+        (None, Destination::Panel(target_side)) => {
             add_to_panel(ctx, target_side, &focused)?;
         }
-        (None, None) => {
-            // Already on the tape — no-op.
+        (None, Destination::Tape) | (None, Destination::Floating) => {
+            // Already off any panel — no-op.
         }
     }
 
@@ -211,5 +224,107 @@ mod tests {
 
         assert!(ctx.state.left.windows.is_empty());
         assert!(ctx.state.right.windows.is_empty());
+    }
+
+    #[test]
+    fn test_send_center_un_floats_originally_floating_window() {
+        // Even if the window was floating before being added to the panel,
+        // `send center` returns it to the tape — semantics are "put this in
+        // the tape" not "restore prior state."
+        let temp_dir = tempdir().unwrap();
+        let win = mock_window(100, true, true, 1, Some((1.0, 2.0)));
+        let mock = MockNiri::new(vec![win]);
+
+        let mut state = AppState::default();
+        state.right.windows.push(WindowState {
+            id: 100,
+            width: 1000,
+            height: 800,
+            is_floating: true,
+            position: Some((5.0, 6.0)),
+        });
+
+        let mut ctx = Ctx {
+            state,
+            config: mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+
+        send(&mut ctx, Target::Center).expect("send failed");
+
+        let actions = &ctx.socket.sent_actions;
+        assert!(
+            actions.iter().any(|a| matches!(a, Action::ToggleWindowFloating { id: Some(100) })),
+            "send center must always un-float"
+        );
+    }
+
+    #[test]
+    fn test_send_panel_window_to_floating_leaves_window_untouched() {
+        // send floating drops tracking but leaves the window exactly where and
+        // what size it is. No size restore, no position move, no float toggle.
+        let temp_dir = tempdir().unwrap();
+        let win = mock_window(100, true, true, 1, Some((42.0, 77.0)));
+        let mock = MockNiri::new(vec![win]);
+
+        let mut state = AppState::default();
+        state.right.windows.push(WindowState {
+            id: 100,
+            width: 1000,
+            height: 800,
+            is_floating: false,
+            position: None,
+        });
+
+        let mut ctx = Ctx {
+            state,
+            config: mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+
+        send(&mut ctx, Target::Floating).expect("send failed");
+
+        assert!(ctx.state.right.windows.is_empty());
+        assert!(ctx.state.ignored_windows.contains(&100));
+
+        let actions = &ctx.socket.sent_actions;
+        assert!(
+            !actions.iter().any(|a| matches!(a, Action::ToggleWindowFloating { .. })),
+            "send floating must not touch float state"
+        );
+        assert!(
+            !actions.iter().any(|a|
+                matches!(a, Action::SetWindowWidth { id: Some(100), .. })
+            ),
+            "send floating must not restore width — window keeps its current size"
+        );
+        assert!(
+            !actions.iter().any(|a|
+                matches!(a, Action::MoveFloatingWindow { id: Some(100), .. })
+            ),
+            "send floating must not move the window"
+        );
+    }
+
+    #[test]
+    fn test_send_tape_to_floating_is_noop() {
+        let temp_dir = tempdir().unwrap();
+        let win = mock_window(100, true, false, 1, None);
+        let mock = MockNiri::new(vec![win]);
+
+        let mut ctx = Ctx {
+            state: AppState::default(),
+            config: mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+
+        send(&mut ctx, Target::Floating).expect("send failed");
+
+        assert!(ctx.state.left.windows.is_empty());
+        assert!(ctx.state.right.windows.is_empty());
+        assert!(!ctx.state.ignored_windows.contains(&100));
     }
 }
