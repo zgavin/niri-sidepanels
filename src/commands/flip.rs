@@ -64,13 +64,15 @@ mod tests {
         assert!(ctx.state.right.is_flipped);
         assert!(!ctx.state.left.is_flipped);
 
-        // After flip: id=2 at base_y 830.
+        // After flip: id=2 at the bottom slot.
+        // Equal-height with 2 windows: per = (1080-50-50-10)/2 = 485.
+        // Bottom y = 1080 - 50 - 485 = 545.
         let actions = &ctx.socket.sent_actions;
         assert!(actions.iter().any(|a| matches!(
             a,
             Action::MoveFloatingWindow {
                 id: Some(2),
-                y: PositionChange::SetFixed(830.0),
+                y: PositionChange::SetFixed(545.0),
                 ..
             }
         )));
