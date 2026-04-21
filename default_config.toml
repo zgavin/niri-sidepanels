@@ -8,8 +8,8 @@
 enabled = false
 # Panel width in pixels.
 width = 400
-# Fixed height for each stacked window (planned to be replaced by equal-height
-# division in a future release).
+# Deprecated: ignored since windows in a panel now split the available vertical
+# space equally. Kept in the schema for forward compatibility.
 height = 335
 # Gap between stacked windows, in pixels.
 gap = 10
