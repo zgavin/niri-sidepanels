@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use clap::ValueEnum;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -6,69 +7,147 @@ use std::path::PathBuf;
 
 pub const DEFAULT_CONFIG_STR: &str = include_str!("../default_config.toml");
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, ValueEnum, Serialize, Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
-pub enum SidebarPosition {
+#[clap(rename_all = "lowercase")]
+pub enum Side {
     Left,
     Right,
-    Top,
-    Bottom,
+}
+
+impl Side {
+    pub const ALL: [Side; 2] = [Side::Left, Side::Right];
+
+    pub fn other(self) -> Side {
+        match self {
+            Side::Left => Side::Right,
+            Side::Right => Side::Left,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
-    pub geometry: Geometry,
-    pub margins: Margins,
-    pub interaction: Interaction,
+    #[serde(default)]
+    pub left: Panel,
+    #[serde(default = "default_right_panel")]
+    pub right: Panel,
     #[serde(default)]
     pub window_rule: Vec<WindowRule>,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            left: Panel::default(),
+            right: default_right_panel(),
+            window_rule: vec![],
+        }
+    }
+}
+
+impl Config {
+    pub fn panel(&self, side: Side) -> &Panel {
+        match side {
+            Side::Left => &self.left,
+            Side::Right => &self.right,
+        }
+    }
+
+    pub fn panel_mut(&mut self, side: Side) -> &mut Panel {
+        match side {
+            Side::Left => &mut self.left,
+            Side::Right => &mut self.right,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Geometry {
+pub struct Panel {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_width")]
     pub width: i32,
+    #[serde(default = "default_height")]
     pub height: i32,
+    #[serde(default = "default_gap")]
     pub gap: i32,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Margins {
-    #[serde(default = "default_margin")]
-    pub top: i32,
-    #[serde(default = "default_margin")]
-    pub right: i32,
-    #[serde(default = "default_margin")]
-    pub left: i32,
-    #[serde(default = "default_margin")]
-    pub bottom: i32,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Interaction {
+    #[serde(default)]
+    pub margins: Margins,
+    #[serde(default = "default_peek")]
     pub peek: i32,
     pub focus_peek: Option<i32>,
-    #[serde(default = "default_position")]
-    pub position: SidebarPosition,
-    #[serde(default = "default_sticky")]
+    #[serde(default)]
     pub sticky: bool,
 }
 
-impl Interaction {
+impl Default for Panel {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            width: default_width(),
+            height: default_height(),
+            gap: default_gap(),
+            margins: Margins::default(),
+            peek: default_peek(),
+            focus_peek: None,
+            sticky: false,
+        }
+    }
+}
+
+impl Panel {
     pub fn get_focus_peek(&self) -> i32 {
         self.focus_peek.unwrap_or(self.peek)
     }
 }
 
-fn default_sticky() -> bool {
-    false
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Margins {
+    #[serde(default)]
+    pub top: i32,
+    #[serde(default)]
+    pub right: i32,
+    #[serde(default)]
+    pub left: i32,
+    #[serde(default)]
+    pub bottom: i32,
 }
 
-fn default_position() -> SidebarPosition {
-    SidebarPosition::Right
+impl Default for Margins {
+    fn default() -> Self {
+        Self {
+            top: 0,
+            right: 0,
+            left: 0,
+            bottom: 0,
+        }
+    }
 }
 
-fn default_margin() -> i32 {
-    0
+fn default_right_panel() -> Panel {
+    Panel {
+        enabled: true,
+        ..Panel::default()
+    }
+}
+
+fn default_width() -> i32 {
+    400
+}
+
+fn default_height() -> i32 {
+    335
+}
+
+fn default_gap() -> i32 {
+    10
+}
+
+fn default_peek() -> i32 {
+    10
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -83,12 +162,9 @@ pub struct WindowRule {
     pub focus_peek: Option<i32>,
     #[serde(default)]
     pub auto_add: bool,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        toml::from_str(DEFAULT_CONFIG_STR).expect("Default config file is invalid TOML")
-    }
+    /// Optional side affinity for auto_add rules. When None, auto_add falls
+    /// back to the right panel if it's enabled, else left.
+    pub side: Option<Side>,
 }
 
 pub fn get_config_dir() -> Result<PathBuf> {
@@ -111,7 +187,7 @@ pub fn load_config() -> Config {
             }
         }
     }
-    Config::default()
+    toml::from_str(DEFAULT_CONFIG_STR).expect("Default config file is invalid TOML")
 }
 
 pub fn init_config() -> Result<()> {

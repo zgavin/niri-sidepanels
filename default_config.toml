@@ -1,45 +1,58 @@
-# niri-sidebar configuration
+# niri-sidepanels configuration
+#
+# The tool supports two independent panels: a left panel and a right panel.
+# Each one has its own width, margins, peek behavior, and window rules.
+# Disable either by setting `enabled = false` in its section.
 
-[geometry]
-# Width of the sidebar in pixels
+[left]
+enabled = false
+# Panel width in pixels.
 width = 400
-# Height of the sidebar windows
+# Fixed height for each stacked window (planned to be replaced by equal-height
+# division in a future release).
 height = 335
-# Gap between windows in the stack
+# Gap between stacked windows, in pixels.
 gap = 10
-
-[margins]
-# Margins are default to 0 if left out
-# Space from the top of the screen
-top = 50
-# Space from the right edge of the screen
-right = 10
-# Space from the left edge of the screen
-left = 10
-# Space from the bottom of the screen
-bottom = 10 
-
-[interaction]
-# Where to put the sidebar, can be "left", "right", "top" or "bottom"
-# Defaults to "right"
-position = "right"
-# Width of windows when sidebar is hidden in pixels
+# How much of the panel peeks in from the edge when hidden, in pixels.
 peek = 10
-# Width of window when sidebar is hidden but window is focused in pixels
-# set this equal to peek to disable this feature
-# set this equal to sidebar_width + offset_right to make focused windows "unhide"
-# Optional and defaults to peek if ommitted
+# How much of the panel is visible when a panel window is focused. Defaults to `peek`.
+# Set equal to `width + margins.left` to make focused windows fully unhide.
 focus_peek = 50
-# Whether the sidebar should follow if you switch workspaces
+# Whether the panel follows you when you switch workspaces.
 sticky = false
 
-# Example window rule
-# all fields are optional if not given a default from other configs will be used
+[left.margins]
+top = 50
+right = 10
+left = 10
+bottom = 10
+
+[right]
+enabled = true
+width = 400
+height = 335
+gap = 10
+peek = 10
+focus_peek = 50
+sticky = false
+
+[right.margins]
+top = 50
+right = 10
+left = 10
+bottom = 10
+
+# Window rules. Rules are global; match an `app_id` and/or `title` regex and
+# override any of width/height/peek/focus_peek. If `auto_add = true`, matching
+# windows are added to the panel indicated by `side` (or the right panel if
+# `side` is omitted and the right panel is enabled).
+#
 # [[window_rule]]
-# app_id = "firefox"  # if not set will match all app_id's
-# title = "^Picture-in-Picture$"  # if not set will match no matter the title
+# app_id = "firefox"
+# title = "^Picture-in-Picture$"
 # width = 700
 # height = 400
 # focus_peek = 710
 # peek = 10
-# auto_add = true  # defaults to false
+# auto_add = true
+# side = "right"
