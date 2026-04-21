@@ -93,7 +93,7 @@ impl Default for Config {
 
 pub fn get_config_dir() -> Result<PathBuf> {
     let mut path = dirs::config_dir().context("Could not find config directory")?;
-    path.push("niri-sidebar");
+    path.push("niri-sidepanels");
     Ok(path)
 }
 

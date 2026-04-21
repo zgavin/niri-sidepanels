@@ -310,7 +310,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "niri-sidebar"
+name = "niri-sidepanels"
 version = "0.1.0"
 dependencies = [
  "anyhow",

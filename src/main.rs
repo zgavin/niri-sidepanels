@@ -1,13 +1,13 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use fslock::LockFile;
-use niri_sidebar::config::load_config;
-use niri_sidebar::state::{get_default_cache_dir, load_state};
-use niri_sidebar::{AppState, Ctx, config, niri::connect};
-use niri_sidebar::{Direction, commands};
+use niri_sidepanels::config::load_config;
+use niri_sidepanels::state::{get_default_cache_dir, load_state};
+use niri_sidepanels::{AppState, Ctx, config, niri::connect};
+use niri_sidepanels::{Direction, commands};
 
 #[derive(Parser)]
-#[command(name = "niri-sidebar")]
+#[command(name = "niri-sidepanels")]
 #[command(about = "A floating sidebar manager for Niri")]
 struct Cli {
     #[command(subcommand)]

@@ -14,7 +14,7 @@ use niri_ipc::{Event, Request, Window};
 pub fn listen(mut ctx: Ctx<Socket>) -> Result<()> {
     let _ = ctx.socket.send(Request::EventStream)?;
     let mut read_event = ctx.socket.read_events();
-    println!("niri-sidebar: Listening for window events...");
+    println!("niri-sidepanels: Listening for window events...");
 
     while let Ok(event) = read_event() {
         match event {
