@@ -1,4 +1,4 @@
-use crate::config::{Geometry, Margins};
+use crate::config::{Margins, Panel};
 use crate::{Config, NiriClient};
 use anyhow::Result;
 use niri_ipc::{Action, Response, Window, WindowLayout, Workspace};
@@ -81,19 +81,31 @@ pub fn mock_window(
     }
 }
 
+/// Build a Config with the left panel disabled and the right panel enabled
+/// using the same dimensions/margins the old tests assumed (width 300,
+/// height 200, gap 10, margins 50/20/10/50).
 pub fn mock_config() -> Config {
-    Config {
-        geometry: Geometry {
-            width: 300,
-            height: 200,
-            gap: 10,
-        },
+    let panel = Panel {
+        enabled: true,
+        width: 300,
+        height: 200,
+        gap: 10,
+        peek: 10,
+        focus_peek: Some(50),
+        sticky: false,
         margins: Margins {
             top: 50,
             right: 20,
             left: 10,
             bottom: 50,
         },
-        ..Default::default()
+    };
+    Config {
+        left: Panel {
+            enabled: false,
+            ..Panel::default()
+        },
+        right: panel,
+        window_rule: vec![],
     }
 }

@@ -1,3 +1,4 @@
+use crate::config::Side;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -5,9 +6,45 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize, Default, PartialEq)]
 pub struct AppState {
-    pub windows: Vec<WindowState>,
+    #[serde(default)]
+    pub left: PanelState,
+    #[serde(default)]
+    pub right: PanelState,
     #[serde(default)]
     pub ignored_windows: Vec<u64>,
+}
+
+impl AppState {
+    pub fn panel(&self, side: Side) -> &PanelState {
+        match side {
+            Side::Left => &self.left,
+            Side::Right => &self.right,
+        }
+    }
+
+    pub fn panel_mut(&mut self, side: Side) -> &mut PanelState {
+        match side {
+            Side::Left => &mut self.left,
+            Side::Right => &mut self.right,
+        }
+    }
+
+    /// Return the side that contains the window with the given id, if any.
+    pub fn side_of(&self, id: u64) -> Option<Side> {
+        if self.left.windows.iter().any(|w| w.id == id) {
+            Some(Side::Left)
+        } else if self.right.windows.iter().any(|w| w.id == id) {
+            Some(Side::Right)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, PartialEq)]
+pub struct PanelState {
+    #[serde(default)]
+    pub windows: Vec<WindowState>,
     #[serde(default)]
     pub is_hidden: bool,
     #[serde(default)]
@@ -76,10 +113,17 @@ mod tests {
         };
 
         let original_state = AppState {
-            windows: vec![w1, w2],
+            left: PanelState {
+                windows: vec![w1],
+                is_hidden: false,
+                is_flipped: false,
+            },
+            right: PanelState {
+                windows: vec![w2],
+                is_hidden: true,
+                is_flipped: true,
+            },
             ignored_windows: vec![100, 200],
-            is_hidden: true,
-            is_flipped: true,
         };
 
         save_state(&original_state, temp_dir.path()).expect("Failed to save state");
@@ -95,28 +139,43 @@ mod tests {
     #[test]
     fn test_load_defaults_if_no_file() {
         let temp_dir = tempdir().unwrap();
-        unsafe {
-            std::env::set_var("NIRI_SIDEBAR_TEST_DIR", temp_dir.path());
-        }
-
         let state = load_state(temp_dir.path()).expect("Should not fail on missing file");
         assert_eq!(state, AppState::default());
-        assert!(state.windows.is_empty());
+        assert!(state.left.windows.is_empty());
+        assert!(state.right.windows.is_empty());
     }
 
     #[test]
     fn test_handles_corrupted_json() {
         let temp_dir = tempdir().unwrap();
-        unsafe {
-            std::env::set_var("NIRI_SIDEBAR_TEST_DIR", temp_dir.path());
-        }
-
         let mut path = temp_dir.path().to_path_buf();
         path.push("state.json");
         fs::write(&path, "{ bad_json: ").unwrap();
 
         let state = load_state(temp_dir.path()).expect("Should recover from bad JSON");
-
         assert_eq!(state, AppState::default());
+    }
+
+    #[test]
+    fn test_side_of_finds_window() {
+        let mut state = AppState::default();
+        state.left.windows.push(WindowState {
+            id: 1,
+            width: 100,
+            height: 100,
+            is_floating: false,
+            position: None,
+        });
+        state.right.windows.push(WindowState {
+            id: 2,
+            width: 100,
+            height: 100,
+            is_floating: false,
+            position: None,
+        });
+
+        assert_eq!(state.side_of(1), Some(Side::Left));
+        assert_eq!(state.side_of(2), Some(Side::Right));
+        assert_eq!(state.side_of(99), None);
     }
 }

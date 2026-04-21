@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use clap::ValueEnum;
 
-pub use crate::config::Config;
+pub use crate::config::{Config, Side};
 pub use crate::niri::NiriClient;
 pub use crate::state::AppState;
 
@@ -30,6 +30,6 @@ pub enum Direction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowTarget {
-    width: i32,
-    height: i32,
+    pub width: i32,
+    pub height: i32,
 }

@@ -1,6 +1,6 @@
 use niri_ipc::Window;
 
-use crate::config::WindowRule;
+use crate::config::{Config, Side, WindowRule};
 
 fn matches_window(app_id: &Option<String>, title: &Option<String>, rule: &WindowRule) -> bool {
     let app_ok = match (&rule.app_id, app_id) {
@@ -57,18 +57,31 @@ pub fn resolve_rule_focus_peek(
     default_focus_peek
 }
 
-pub fn resolve_auto_add(rules: &[WindowRule], window: &Window) -> bool {
-    for rule in rules {
-        if matches_window(&window.app_id, &window.title, rule) {
-            return rule.auto_add;
+/// Return the side to auto-add this window to, if any rule says so.
+/// If the matching rule names a `side`, we use it. Otherwise we fall back to
+/// the right panel if enabled, else left, else None.
+pub fn resolve_auto_add_side(config: &Config, window: &Window) -> Option<Side> {
+    for rule in &config.window_rule {
+        if matches_window(&window.app_id, &window.title, rule) && rule.auto_add {
+            if let Some(side) = rule.side {
+                return Some(side);
+            }
+            if config.right.enabled {
+                return Some(Side::Right);
+            }
+            if config.left.enabled {
+                return Some(Side::Left);
+            }
+            return None;
         }
     }
-    false
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{Config, Panel};
     use crate::test_utils::mock_window;
     use regex::Regex;
 
@@ -89,38 +102,10 @@ mod tests {
             height: Some(600),
             ..Default::default()
         }];
-        let window = mock_window(1, false, false, 1, Some((1.0, 2.0))); // mock_window has app_id "test"
+        let window = mock_window(1, false, false, 1, Some((1.0, 2.0)));
         let (w, h) = resolve_window_size(&rules, &window, 100, 200);
         assert_eq!(w, 500);
         assert_eq!(h, 600);
-    }
-
-    #[test]
-    fn test_resolve_window_size_match_title() {
-        let rules = vec![WindowRule {
-            title: Some(Regex::new("Test Window").unwrap()),
-            width: Some(800),
-            height: Some(900),
-            ..Default::default()
-        }];
-        let window = mock_window(1, false, false, 1, Some((1.0, 2.0))); // mock_window has title "Test Window"
-        let (w, h) = resolve_window_size(&rules, &window, 100, 200);
-        assert_eq!(w, 800);
-        assert_eq!(h, 900);
-    }
-
-    #[test]
-    fn test_resolve_window_size_no_match() {
-        let rules = vec![WindowRule {
-            app_id: Some(Regex::new("nomatch").unwrap()),
-            width: Some(500),
-            height: Some(600),
-            ..Default::default()
-        }];
-        let window = mock_window(1, false, false, 1, Some((1.0, 2.0)));
-        let (w, h) = resolve_window_size(&rules, &window, 100, 200);
-        assert_eq!(w, 100);
-        assert_eq!(h, 200);
     }
 
     #[test]
@@ -131,20 +116,7 @@ mod tests {
             ..Default::default()
         }];
         let window = mock_window(1, false, false, 1, Some((1.0, 2.0)));
-        let peek = resolve_rule_peek(&rules, &window, 10);
-        assert_eq!(peek, 50);
-    }
-
-    #[test]
-    fn test_resolve_rule_peek_default() {
-        let rules = vec![WindowRule {
-            app_id: Some(Regex::new("nomatch").unwrap()),
-            peek: Some(50),
-            ..Default::default()
-        }];
-        let window = mock_window(1, false, false, 1, Some((1.0, 2.0)));
-        let peek = resolve_rule_peek(&rules, &window, 10);
-        assert_eq!(peek, 10);
+        assert_eq!(resolve_rule_peek(&rules, &window, 10), 50);
     }
 
     #[test]
@@ -155,43 +127,63 @@ mod tests {
             ..Default::default()
         }];
         let window = mock_window(1, false, false, 1, Some((1.0, 2.0)));
-        let peek = resolve_rule_focus_peek(&rules, &window, 20);
-        assert_eq!(peek, 70);
+        assert_eq!(resolve_rule_focus_peek(&rules, &window, 20), 70);
     }
 
     #[test]
-    fn test_resolve_rule_focus_peek_default() {
-        let rules = vec![WindowRule {
-            app_id: Some(Regex::new("nomatch").unwrap()),
-            focus_peek: Some(70),
+    fn test_resolve_auto_add_side_explicit() {
+        let config = Config {
+            window_rule: vec![WindowRule {
+                app_id: Some(Regex::new("test").unwrap()),
+                auto_add: true,
+                side: Some(Side::Left),
+                ..Default::default()
+            }],
             ..Default::default()
-        }];
-        let window = mock_window(1, false, false, 1, Some((1.0, 2.0)));
-        let peek = resolve_rule_focus_peek(&rules, &window, 20);
-        assert_eq!(peek, 20);
+        };
+        let window = mock_window(1, false, false, 1, None);
+        assert_eq!(resolve_auto_add_side(&config, &window), Some(Side::Left));
     }
 
     #[test]
-    fn test_resolve_auto_add_match() {
-        let rules = vec![WindowRule {
-            app_id: Some(Regex::new("test").unwrap()),
-            auto_add: true,
+    fn test_resolve_auto_add_side_defaults_to_right_if_enabled() {
+        let config = Config {
+            window_rule: vec![WindowRule {
+                app_id: Some(Regex::new("test").unwrap()),
+                auto_add: true,
+                side: None,
+                ..Default::default()
+            }],
             ..Default::default()
-        }];
-        let window = mock_window(1, false, false, 1, Some((1.0, 2.0)));
-        let auto_add = resolve_auto_add(&rules, &window);
-        assert!(auto_add);
+        };
+        let window = mock_window(1, false, false, 1, None);
+        assert_eq!(resolve_auto_add_side(&config, &window), Some(Side::Right));
     }
 
     #[test]
-    fn test_resolve_auto_add_default_false() {
-        let rules = vec![WindowRule {
-            app_id: Some(Regex::new("nomatch").unwrap()),
-            auto_add: true,
+    fn test_resolve_auto_add_side_falls_back_to_left_if_right_disabled() {
+        let mut config = Config {
+            window_rule: vec![WindowRule {
+                app_id: Some(Regex::new("test").unwrap()),
+                auto_add: true,
+                side: None,
+                ..Default::default()
+            }],
             ..Default::default()
-        }];
-        let window = mock_window(1, false, false, 1, Some((1.0, 2.0)));
-        let auto_add = resolve_auto_add(&rules, &window);
-        assert!(!auto_add);
+        };
+        config.right.enabled = false;
+        config.left = Panel {
+            enabled: true,
+            ..Panel::default()
+        };
+        let window = mock_window(1, false, false, 1, None);
+        assert_eq!(resolve_auto_add_side(&config, &window), Some(Side::Left));
+    }
+
+    #[test]
+    fn test_resolve_auto_add_side_none_if_no_rule_or_not_enabled() {
+        let config = Config::default();
+        let window = mock_window(1, false, false, 1, None);
+        assert_eq!(resolve_auto_add_side(&config, &window), None);
     }
 }

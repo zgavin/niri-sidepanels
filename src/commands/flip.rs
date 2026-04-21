@@ -1,11 +1,13 @@
 use crate::Ctx;
 use crate::commands::reorder;
+use crate::config::Side;
 use crate::niri::NiriClient;
 use crate::state::save_state;
 use anyhow::Result;
 
-pub fn toggle_flip<C: NiriClient>(ctx: &mut Ctx<C>) -> Result<()> {
-    ctx.state.is_flipped = !ctx.state.is_flipped;
+pub fn toggle_flip<C: NiriClient>(ctx: &mut Ctx<C>, side: Side) -> Result<()> {
+    let panel_state = ctx.state.panel_mut(side);
+    panel_state.is_flipped = !panel_state.is_flipped;
     save_state(&ctx.state, &ctx.cache_dir)?;
     reorder(ctx)?;
     Ok(())
@@ -14,37 +16,42 @@ pub fn toggle_flip<C: NiriClient>(ctx: &mut Ctx<C>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{AppState, WindowState};
+    use crate::state::{AppState, PanelState, WindowState};
     use crate::test_utils::{MockNiri, mock_config, mock_window};
     use niri_ipc::{Action, PositionChange};
     use tempfile::tempdir;
 
     #[test]
-    fn test_toggle_flip() {
+    fn test_toggle_flip_right() {
         let temp_dir = tempdir().unwrap();
 
-        let w1 = mock_window(1, false, false, 1, None);
+        let w1 = mock_window(1, false, true, 1, None);
         let w2 = mock_window(2, true, true, 1, Some((1.0, 2.0)));
         let mock = MockNiri::new(vec![w1, w2]);
 
-        let mut state = AppState::default();
-        let w1 = WindowState {
-            id: 1,
-            width: 300,
-            height: 500,
-            is_floating: false,
-            position: None,
+        let state = AppState {
+            right: PanelState {
+                windows: vec![
+                    WindowState {
+                        id: 1,
+                        width: 300,
+                        height: 200,
+                        is_floating: true,
+                        position: None,
+                    },
+                    WindowState {
+                        id: 2,
+                        width: 300,
+                        height: 200,
+                        is_floating: true,
+                        position: Some((1.0, 2.0)),
+                    },
+                ],
+                is_hidden: false,
+                is_flipped: false,
+            },
+            ..Default::default()
         };
-        let w2 = WindowState {
-            id: 2,
-            width: 300,
-            height: 500,
-            is_floating: true,
-            position: Some((1.0, 2.0)),
-        };
-        state.windows.push(w1);
-        state.windows.push(w2);
-        state.is_flipped = false;
 
         let mut ctx = Ctx {
             state,
@@ -53,16 +60,12 @@ mod tests {
             cache_dir: temp_dir.path().to_path_buf(),
         };
 
-        toggle_flip(&mut ctx).expect("Toggle flip failed");
-        assert!(ctx.state.is_flipped);
+        toggle_flip(&mut ctx, Side::Right).expect("Toggle flip failed");
+        assert!(ctx.state.right.is_flipped);
+        assert!(!ctx.state.left.is_flipped);
 
-        // Check reorder happened:
-        // Normally (Unflipped): Index 0 is bottom, Index 1 is top.
-        // Flipped: Index 1 (Window 2) should be at the bottom Y.
-
-        // Base Y (Bottom slot) = 1080 - 200 - 50 = 830.
+        // After flip: id=2 at base_y 830.
         let actions = &ctx.socket.sent_actions;
-        dbg!(actions);
         assert!(actions.iter().any(|a| matches!(
             a,
             Action::MoveFloatingWindow {
@@ -71,5 +74,22 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn test_toggle_flip_left_only_affects_left() {
+        let temp_dir = tempdir().unwrap();
+        let mock = MockNiri::new(vec![]);
+
+        let mut ctx = Ctx {
+            state: AppState::default(),
+            config: mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+
+        toggle_flip(&mut ctx, Side::Left).expect("Toggle flip failed");
+        assert!(ctx.state.left.is_flipped);
+        assert!(!ctx.state.right.is_flipped);
     }
 }
