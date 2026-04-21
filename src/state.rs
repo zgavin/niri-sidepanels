@@ -25,7 +25,7 @@ pub struct WindowState {
 
 pub fn get_default_cache_dir() -> Result<PathBuf> {
     let mut path = dirs::cache_dir().context("Could not find cache directory")?;
-    path.push("niri-sidebar");
+    path.push("niri-sidepanels");
     if !path.exists() {
         fs::create_dir_all(&path)?;
     }
