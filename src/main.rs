@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use fslock::LockFile;
+use niri_sidepanels::commands::Target;
 use niri_sidepanels::config::{Side, load_config};
 use niri_sidepanels::state::{get_default_cache_dir, load_state};
 use niri_sidepanels::{AppState, Ctx, config, niri::connect};
@@ -20,6 +21,14 @@ enum Commands {
     ToggleWindow {
         #[arg(value_enum)]
         side: Side,
+    },
+    /// Send the focused window to a specific destination (left, right, or
+    /// center). `center` means "remove from whichever panel it's on and
+    /// return to the normal tiling tape". Unlike `toggle-window`, `send` is
+    /// not toggling: a window already on `target` stays there.
+    Send {
+        #[arg(value_enum)]
+        target: Target,
     },
     /// Hide or show the given panel.
     ToggleVisibility {
@@ -86,6 +95,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::ToggleWindow { side } => commands::toggle_window(&mut ctx, side)?,
+        Commands::Send { target } => commands::send(&mut ctx, target)?,
         Commands::ToggleVisibility { side } => commands::toggle_visibility(&mut ctx, side)?,
         Commands::Flip { side } => commands::toggle_flip(&mut ctx, side)?,
         Commands::Reorder => commands::reorder(&mut ctx)?,

@@ -65,7 +65,11 @@ pub fn add_to_panel<C: NiriClient>(ctx: &mut Ctx<C>, side: Side, window: &Window
     Ok(())
 }
 
-fn remove_from_panel<C: NiriClient>(ctx: &mut Ctx<C>, side: Side, window: &Window) -> Result<()> {
+pub(crate) fn remove_from_panel<C: NiriClient>(
+    ctx: &mut Ctx<C>,
+    side: Side,
+    window: &Window,
+) -> Result<()> {
     let panel_state = ctx.state.panel_mut(side);
     let index = panel_state
         .windows
