@@ -5,6 +5,7 @@ mod hide;
 mod listen;
 mod movefrom;
 mod reorder;
+mod send;
 mod togglewindow;
 
 pub use close::close;
@@ -14,4 +15,5 @@ pub use hide::toggle_visibility;
 pub use listen::listen;
 pub use movefrom::move_from;
 pub use reorder::reorder;
+pub use send::{Target, send};
 pub use togglewindow::toggle_window;
