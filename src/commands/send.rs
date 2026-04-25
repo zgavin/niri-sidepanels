@@ -6,6 +6,7 @@ use crate::niri::NiriClient;
 use crate::state::save_state;
 use anyhow::Result;
 use clap::ValueEnum;
+use niri_ipc::Action;
 
 /// Where to send the focused window.
 ///
@@ -67,8 +68,23 @@ pub fn send<C: NiriClient>(ctx: &mut Ctx<C>, target: Target) -> Result<()> {
         (None, Destination::Panel(target_side)) => {
             add_to_panel(ctx, target_side, &focused)?;
         }
-        (None, Destination::Tape) | (None, Destination::Floating) => {
-            // Already off any panel — no-op.
+        (None, Destination::Tape) => {
+            // Untracked but currently floating — un-float to put it back in
+            // the tape. Already-tiled windows are a no-op.
+            if focused.is_floating {
+                let _ = ctx.socket.send_action(Action::ToggleWindowFloating {
+                    id: Some(focused.id),
+                });
+            }
+        }
+        (None, Destination::Floating) => {
+            // Untracked but currently tiled — float it. Already-floating
+            // windows are a no-op.
+            if !focused.is_floating {
+                let _ = ctx.socket.send_action(Action::ToggleWindowFloating {
+                    id: Some(focused.id),
+                });
+            }
         }
     }
 
@@ -309,7 +325,9 @@ mod tests {
     }
 
     #[test]
-    fn test_send_tape_to_floating_is_noop() {
+    fn test_send_tiled_untracked_to_floating_floats_it() {
+        // A tape window that isn't on any panel becomes a free-floating
+        // window when sent to floating — same effect as niri's own toggle.
         let temp_dir = tempdir().unwrap();
         let win = mock_window(100, true, false, 1, None);
         let mock = MockNiri::new(vec![win]);
@@ -323,8 +341,62 @@ mod tests {
 
         send(&mut ctx, Target::Floating).expect("send failed");
 
+        // No tracking change — still off any panel.
         assert!(ctx.state.left.windows.is_empty());
         assert!(ctx.state.right.windows.is_empty());
         assert!(!ctx.state.ignored_windows.contains(&100));
+
+        let actions = &ctx.socket.sent_actions;
+        assert!(
+            actions.iter().any(|a| matches!(a, Action::ToggleWindowFloating { id: Some(100) })),
+            "send floating on a tiled tape window must float it"
+        );
+    }
+
+    #[test]
+    fn test_send_floating_untracked_to_floating_is_noop() {
+        // Already floating and untracked — nothing to do.
+        let temp_dir = tempdir().unwrap();
+        let win = mock_window(100, true, true, 1, Some((1.0, 2.0)));
+        let mock = MockNiri::new(vec![win]);
+
+        let mut ctx = Ctx {
+            state: AppState::default(),
+            config: mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+
+        send(&mut ctx, Target::Floating).expect("send failed");
+
+        let actions = &ctx.socket.sent_actions;
+        assert!(
+            !actions.iter().any(|a| matches!(a, Action::ToggleWindowFloating { id: Some(100) })),
+            "send floating on an already-floating window must not toggle"
+        );
+    }
+
+    #[test]
+    fn test_send_floating_untracked_to_center_un_floats_it() {
+        // A floating window not tracked by any panel returns to the tape
+        // when sent to center.
+        let temp_dir = tempdir().unwrap();
+        let win = mock_window(100, true, true, 1, Some((1.0, 2.0)));
+        let mock = MockNiri::new(vec![win]);
+
+        let mut ctx = Ctx {
+            state: AppState::default(),
+            config: mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+
+        send(&mut ctx, Target::Center).expect("send failed");
+
+        let actions = &ctx.socket.sent_actions;
+        assert!(
+            actions.iter().any(|a| matches!(a, Action::ToggleWindowFloating { id: Some(100) })),
+            "send center on a floating untracked window must un-float it"
+        );
     }
 }
