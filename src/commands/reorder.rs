@@ -720,67 +720,101 @@ mod tests {
 
     #[test]
     fn test_check_layout_exact_match() {
+        // Given: an expected layout and a reported layout with identical values.
         let expected = ExpectedLayout { x: 100, y: 200, width: 300, height: 400 };
         let reported = reported_at(Some((100.0, 200.0)), (300, 400));
-        assert_eq!(check_layout(&expected, &reported), LayoutCheck::Match);
+
+        // When: we compare them.
+        let check = check_layout(&expected, &reported);
+
+        // Then: the result is Match — no drift detected.
+        assert_eq!(check, LayoutCheck::Match);
     }
 
     #[test]
     fn test_check_layout_subpixel_drift_within_tolerance() {
+        // Given: a 0.5px drift on both axes — below the 1.0px threshold.
         let expected = ExpectedLayout { x: 100, y: 200, width: 300, height: 400 };
-        // 0.5px drift on both axes — below the 1.0px threshold.
         let reported = reported_at(Some((100.5, 199.5)), (300, 400));
-        assert_eq!(check_layout(&expected, &reported), LayoutCheck::Match);
+
+        // When: we compare.
+        let check = check_layout(&expected, &reported);
+
+        // Then: it's still a Match; sub-pixel noise must not trigger an eject.
+        assert_eq!(check, LayoutCheck::Match);
     }
 
     #[test]
     fn test_check_layout_position_drift() {
+        // Given: a 5px shift on x — clearly larger than rounding noise.
         let expected = ExpectedLayout { x: 100, y: 200, width: 300, height: 400 };
-        // 5px shift on x — clearly a user move.
         let reported = reported_at(Some((105.0, 200.0)), (300, 400));
-        assert_eq!(check_layout(&expected, &reported), LayoutCheck::Drift);
+
+        // When: we compare.
+        let check = check_layout(&expected, &reported);
+
+        // Then: the result is Drift — caller should eject.
+        assert_eq!(check, LayoutCheck::Drift);
     }
 
     #[test]
     fn test_check_layout_size_drift() {
+        // Given: position matches but width has changed by 50 — user resized.
         let expected = ExpectedLayout { x: 100, y: 200, width: 300, height: 400 };
-        // Width changed by 50 — user resized.
         let reported = reported_at(Some((100.0, 200.0)), (350, 400));
-        assert_eq!(check_layout(&expected, &reported), LayoutCheck::Drift);
+
+        // When: we compare.
+        let check = check_layout(&expected, &reported);
+
+        // Then: result is Drift — resize counts the same as a move.
+        assert_eq!(check, LayoutCheck::Drift);
     }
 
     #[test]
     fn test_check_layout_position_at_threshold_drifts() {
+        // Given: a position diff of exactly 1.0px (the threshold value).
         let expected = ExpectedLayout { x: 100, y: 200, width: 300, height: 400 };
-        // Exactly 1.0px — at the threshold counts as drift.
         let reported = reported_at(Some((101.0, 200.0)), (300, 400));
-        assert_eq!(check_layout(&expected, &reported), LayoutCheck::Drift);
+
+        // When: we compare.
+        let check = check_layout(&expected, &reported);
+
+        // Then: at-threshold counts as Drift (`>= LAYOUT_TOLERANCE_PX`).
+        assert_eq!(check, LayoutCheck::Drift);
     }
 
     #[test]
     fn test_check_layout_insufficient_when_pos_missing() {
+        // Given: niri reports no workspace-view position for the window.
         let expected = ExpectedLayout { x: 100, y: 200, width: 300, height: 400 };
-        // niri didn't report a workspace-view position — can't check.
         let reported = reported_at(None, (300, 400));
-        assert_eq!(check_layout(&expected, &reported), LayoutCheck::Insufficient);
+
+        // When: we compare.
+        let check = check_layout(&expected, &reported);
+
+        // Then: result is Insufficient — caller should *not* eject on missing
+        // info; we can't tell whether the user moved it.
+        assert_eq!(check, LayoutCheck::Insufficient);
     }
 
     #[test]
     fn test_compute_layouts_returns_one_entry_per_panel_window() {
-        // Two windows tracked on right, computed layouts should have two entries
-        // matching what reorder applies.
+        // Given: two windows tracked on the right panel, both on the active
+        // workspace (1).
         let w1 = mock_window(1, false, true, 1, None);
         let w2 = mock_window(2, false, true, 1, None);
         let state = AppState {
             right: panel_state_with(vec![win_state(1), win_state(2)]),
             ..Default::default()
         };
+
+        // When: we compute layouts for a 1920x1080 screen.
         let layouts = compute_layouts(&mock_config(), &state, &[w1, w2], 1, (1920, 1080));
 
+        // Then: we get one ExpectedLayout per tracked window, matching what
+        // reorder would apply. N=2 → per_height = (980 - 10) / 2 = 485;
+        // bottom (id=1) at y=545, top (id=2) at y=50.
         assert_eq!(layouts.len(), 2);
-        // N=2: per_height = (980 - 10) / 2 = 485
-        // bottom (id=1): y = 1080 - 50 - 485 = 545
-        // top    (id=2): y = 545 - 10 - 485 = 50
         assert_eq!(
             layouts.iter().find(|(id, _)| *id == 1).unwrap().1,
             ExpectedLayout { x: 1600, y: 545, width: 300, height: 485 }
@@ -793,15 +827,19 @@ mod tests {
 
     #[test]
     fn test_compute_layouts_skips_other_workspace_windows() {
+        // Given: two tracked windows but only one on the active workspace.
         let w_here = mock_window(1, false, true, 1, None);
         let w_else = mock_window(2, false, true, 99, None);
         let state = AppState {
             right: panel_state_with(vec![win_state(1), win_state(2)]),
             ..Default::default()
         };
+
+        // When: we compute layouts for workspace 1.
         let layouts = compute_layouts(&mock_config(), &state, &[w_here, w_else], 1, (1920, 1080));
-        // Only id=1 is on workspace 1, so it gets a layout. id=2 is off-workspace
-        // and excluded — n becomes 1, so id=1 fills the panel.
+
+        // Then: only the on-workspace window gets a layout, and it fills
+        // the panel since n=1 from this workspace's perspective.
         assert_eq!(layouts.len(), 1);
         assert_eq!(layouts[0].0, 1);
         assert_eq!(layouts[0].1.height, 980);
@@ -809,6 +847,8 @@ mod tests {
 
     #[test]
     fn test_compute_layouts_skips_disabled_panel() {
+        // Given: a tracked window in the right panel, but the right panel is
+        // disabled in config.
         let w1 = mock_window(1, false, true, 1, None);
         let mut config = mock_config();
         config.right.enabled = false;
@@ -816,7 +856,12 @@ mod tests {
             right: panel_state_with(vec![win_state(1)]),
             ..Default::default()
         };
+
+        // When: we compute layouts.
         let layouts = compute_layouts(&config, &state, &[w1], 1, (1920, 1080));
+
+        // Then: the disabled panel contributes no layouts, so the result is
+        // empty even though the window is tracked.
         assert!(layouts.is_empty());
     }
 }

@@ -475,7 +475,8 @@ mod tests {
 
     #[test]
     fn test_wlc_no_panel_tracked_windows_is_noop() {
-        // No tracked windows means we can skip the niri queries entirely.
+        // Given: empty AppState (no tracked windows in either panel) and a
+        // WLC event for an arbitrary unknown window.
         let temp_dir = tempdir().unwrap();
         let mock = MockNiri::new(vec![]);
         let mut ctx = Ctx {
@@ -484,22 +485,25 @@ mod tests {
             socket: mock,
             cache_dir: temp_dir.path().to_path_buf(),
         };
-
         let changes = vec![(42, reported_at(Some((100.0, 200.0)), (300, 400)))];
+
+        // When: we process the event.
         process_window_layouts_changed(&mut ctx, &changes).expect("WLC failed");
 
+        // Then: nothing changes — no actions sent, no state mutated. The
+        // short-circuit avoids paying for the niri queries.
         assert!(ctx.socket.sent_actions.is_empty());
         assert!(ctx.state.right.windows.is_empty());
     }
 
     #[test]
     fn test_wlc_matching_layout_does_not_eject() {
-        // Window in the right panel reporting its expected layout — our own
-        // echo, not a user move. No ejection, no state change.
+        // Given: a single window tracked by the right panel at the position
+        // and size the daemon would itself compute (1-window layout:
+        // x=1600, y=50, w=300, h=980).
         let temp_dir = tempdir().unwrap();
         let w1 = mock_window(1, false, true, 1, Some((1600.0, 50.0)));
         let mock = MockNiri::new(vec![w1]);
-
         let mut state = AppState::default();
         state.right.windows.push(ws_state(1));
         let mut ctx = Ctx {
@@ -508,22 +512,23 @@ mod tests {
             socket: mock,
             cache_dir: temp_dir.path().to_path_buf(),
         };
-
-        // 1-window layout: x=1600, y=50, height=980, width=300.
         let changes = vec![(1, reported_at(Some((1600.0, 50.0)), (300, 980)))];
+
+        // When: niri reports back the same layout we just imposed (our own echo).
         process_window_layouts_changed(&mut ctx, &changes).expect("WLC failed");
 
+        // Then: the window stays tracked and isn't pushed into ignored_windows.
         assert_eq!(ctx.state.right.windows.len(), 1, "window must remain tracked");
         assert!(!ctx.state.ignored_windows.contains(&1));
     }
 
     #[test]
     fn test_wlc_drift_position_ejects() {
-        // Window reports a position 200px off — clearly a user drag.
+        // Given: a tracked panel window whose niri-reported position is far
+        // from the panel's expected slot — simulating a user drag.
         let temp_dir = tempdir().unwrap();
         let w1 = mock_window(1, false, true, 1, Some((400.0, 300.0)));
         let mock = MockNiri::new(vec![w1]);
-
         let mut state = AppState::default();
         state.right.windows.push(ws_state(1));
         let mut ctx = Ctx {
@@ -532,21 +537,24 @@ mod tests {
             socket: mock,
             cache_dir: temp_dir.path().to_path_buf(),
         };
-
         let changes = vec![(1, reported_at(Some((400.0, 300.0)), (300, 980)))];
+
+        // When: the WLC handler runs.
         process_window_layouts_changed(&mut ctx, &changes).expect("WLC failed");
 
+        // Then: the window is ejected from panel tracking and added to
+        // ignored_windows so the listener doesn't auto-re-add it.
         assert!(ctx.state.right.windows.is_empty(), "drifted window must be ejected");
         assert!(ctx.state.ignored_windows.contains(&1));
     }
 
     #[test]
     fn test_wlc_drift_size_ejects() {
-        // Window position is right but the user resized it — also an eject.
+        // Given: a tracked window at its expected position but with a
+        // user-resized width (300 → 500).
         let temp_dir = tempdir().unwrap();
         let w1 = mock_window(1, false, true, 1, Some((1600.0, 50.0)));
         let mock = MockNiri::new(vec![w1]);
-
         let mut state = AppState::default();
         state.right.windows.push(ws_state(1));
         let mut ctx = Ctx {
@@ -555,24 +563,24 @@ mod tests {
             socket: mock,
             cache_dir: temp_dir.path().to_path_buf(),
         };
-
-        // Width changed from 300 to 500 — user resized.
         let changes = vec![(1, reported_at(Some((1600.0, 50.0)), (500, 980)))];
+
+        // When: the WLC handler runs.
         process_window_layouts_changed(&mut ctx, &changes).expect("WLC failed");
 
+        // Then: a resize triggers an eject just like a move does.
         assert!(ctx.state.right.windows.is_empty());
         assert!(ctx.state.ignored_windows.contains(&1));
     }
 
     #[test]
     fn test_wlc_drift_ejected_remaining_windows_reorder() {
-        // Two tracked windows; one drifts out, the other should re-stack to fill
-        // the freed space (1-window layout: height = 980).
+        // Given: two tracked windows in the right panel; the first at its
+        // 2-window expected slot and the second visibly dragged off.
         let temp_dir = tempdir().unwrap();
         let w1 = mock_window(1, false, true, 1, Some((1600.0, 545.0)));
-        let w2 = mock_window(2, false, true, 1, Some((400.0, 300.0))); // drifted
+        let w2 = mock_window(2, false, true, 1, Some((400.0, 300.0)));
         let mock = MockNiri::new(vec![w1, w2]);
-
         let mut state = AppState::default();
         state.right.windows.push(ws_state(1));
         state.right.windows.push(ws_state(2));
@@ -582,20 +590,18 @@ mod tests {
             socket: mock,
             cache_dir: temp_dir.path().to_path_buf(),
         };
-
         let changes = vec![
-            // id=1 at its 2-window expected slot — no drift.
             (1, reported_at(Some((1600.0, 545.0)), (300, 485))),
-            // id=2 dragged off — drift.
             (2, reported_at(Some((400.0, 300.0)), (300, 485))),
         ];
+
+        // When: the WLC handler processes both reports.
         process_window_layouts_changed(&mut ctx, &changes).expect("WLC failed");
 
+        // Then: id=2 is ejected and id=1 re-stacks to fill the panel —
+        // height becomes the 1-window value of 980.
         assert_eq!(ctx.state.right.windows.len(), 1);
         assert_eq!(ctx.state.right.windows[0].id, 1);
-
-        // Reorder fired: the surviving window should be sized to the 1-window
-        // height of 980.
         let actions = &ctx.socket.sent_actions;
         assert!(
             actions.iter().any(|a| matches!(a,
@@ -610,8 +616,8 @@ mod tests {
 
     #[test]
     fn test_wlc_unknown_window_ignored() {
-        // WLC reports a window niri-sidepanels has never tracked. No-op even
-        // if the layout would mismatch what we'd compute.
+        // Given: a tracked window in the right panel and a WLC report for a
+        // completely different window id (999) that no panel tracks.
         let temp_dir = tempdir().unwrap();
         let w1 = mock_window(1, false, true, 1, Some((1600.0, 50.0)));
         let mock = MockNiri::new(vec![w1]);
@@ -625,10 +631,14 @@ mod tests {
             cache_dir: temp_dir.path().to_path_buf(),
         };
 
-        // Unknown id 999 with arbitrary layout — should not eject anything.
         let changes = vec![(999, reported_at(Some((42.0, 42.0)), (1, 1)))];
+
+        // When: the WLC handler runs against a layout that would mismatch if
+        // 999 were tracked.
         process_window_layouts_changed(&mut ctx, &changes).expect("WLC failed");
 
+        // Then: the unknown window is silently ignored — the tracked window
+        // stays put and 999 is not pushed to ignored_windows.
         assert_eq!(ctx.state.right.windows.len(), 1);
         assert!(!ctx.state.ignored_windows.contains(&999));
     }
