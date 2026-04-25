@@ -52,8 +52,8 @@ pub(crate) fn check_layout(expected: &ExpectedLayout, reported: &WindowLayout) -
     let pos_drift = (rx - expected.x as f64).abs() >= LAYOUT_TOLERANCE_PX
         || (ry - expected.y as f64).abs() >= LAYOUT_TOLERANCE_PX;
     let (rw, rh) = reported.window_size;
-    let size_drift =
-        (rw - expected.width).abs() >= 1 || (rh - expected.height).abs() >= 1;
+    let size_drift = ((rw - expected.width).abs() as f64) >= LAYOUT_TOLERANCE_PX
+        || ((rh - expected.height).abs() as f64) >= LAYOUT_TOLERANCE_PX;
     if pos_drift || size_drift {
         LayoutCheck::Drift
     } else {
