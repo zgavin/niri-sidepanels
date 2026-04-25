@@ -1,23 +1,68 @@
-use crate::config::{Panel, Side};
+use crate::config::{Config, Panel, Side, WindowRule};
 use crate::niri::NiriClient;
-use crate::state::{PanelState, save_state};
+use crate::state::{AppState, PanelState, save_state};
 use crate::window_rules::{resolve_rule_focus_peek, resolve_rule_peek, resolve_window_size};
 use crate::{Ctx, WindowTarget};
 use anyhow::Result;
-use niri_ipc::{Action, PositionChange, SizeChange, Window};
+use niri_ipc::{Action, PositionChange, SizeChange, Window, WindowLayout};
 use std::collections::HashSet;
 
 /// Never shrink a panel window below this height even if many windows are
 /// stacked. Prevents division producing unusable or negative heights.
 const MIN_WINDOW_HEIGHT: i32 = 80;
 
-fn resolve_width<C: NiriClient>(window: &Window, panel: &Panel, ctx: &Ctx<C>) -> i32 {
-    let (width, _) = resolve_window_size(
-        &ctx.config.window_rule,
-        window,
-        panel.width,
-        panel.height,
-    );
+/// Drift threshold for treating a window's reported layout as a user move or
+/// resize rather than our own echo. Sub-pixel noise stays below this; any
+/// real drag (~several pixels minimum) clears it.
+pub(crate) const LAYOUT_TOLERANCE_PX: f64 = 1.0;
+
+/// What the daemon thinks a panel window should look like right now. Computed
+/// from config + state + niri's current window list. Used both as the source
+/// of truth that `reorder` applies, and as the "expected" side of the
+/// comparison when a `WindowLayoutsChanged` event arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExpectedLayout {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// Result of comparing a niri-reported layout against the daemon's expected
+/// layout for a panel window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LayoutCheck {
+    /// Reported layout matches expected within tolerance — likely our own
+    /// echo from a recent reorder.
+    Match,
+    /// Reported layout differs from expected — the user moved or resized.
+    Drift,
+    /// Reported layout doesn't carry enough information to decide (e.g.
+    /// `tile_pos_in_workspace_view` is `None`). Treat as match-by-default
+    /// rather than spuriously eject.
+    Insufficient,
+}
+
+/// Compare a niri-reported `WindowLayout` against a daemon-computed
+/// `ExpectedLayout`.
+pub(crate) fn check_layout(expected: &ExpectedLayout, reported: &WindowLayout) -> LayoutCheck {
+    let Some((rx, ry)) = reported.tile_pos_in_workspace_view else {
+        return LayoutCheck::Insufficient;
+    };
+    let pos_drift = (rx - expected.x as f64).abs() >= LAYOUT_TOLERANCE_PX
+        || (ry - expected.y as f64).abs() >= LAYOUT_TOLERANCE_PX;
+    let (rw, rh) = reported.window_size;
+    let size_drift =
+        (rw - expected.width).abs() >= 1 || (rh - expected.height).abs() >= 1;
+    if pos_drift || size_drift {
+        LayoutCheck::Drift
+    } else {
+        LayoutCheck::Match
+    }
+}
+
+fn resolve_width(window: &Window, panel: &Panel, rules: &[WindowRule]) -> i32 {
+    let (width, _) = resolve_window_size(rules, window, panel.width, panel.height);
     width
 }
 
@@ -90,19 +135,39 @@ pub fn reorder<C: NiriClient>(ctx: &mut Ctx<C>) -> Result<()> {
     Ok(())
 }
 
-fn reorder_side<C: NiriClient>(
-    ctx: &mut Ctx<C>,
+/// Compute the expected layout for every panel-tracked window currently on
+/// the active workspace. Pure function — same inputs, same outputs, no I/O.
+/// Used both by `reorder` (to drive niri actions) and by the
+/// `WindowLayoutsChanged` listener (to compare against reported layouts).
+pub(crate) fn compute_layouts(
+    config: &Config,
+    state: &AppState,
+    all_windows: &[Window],
+    current_ws: u64,
+    screen: (i32, i32),
+) -> Vec<(u64, ExpectedLayout)> {
+    let mut out = Vec::new();
+    for side in Side::ALL {
+        compute_layout_for_side(config, state, side, all_windows, current_ws, screen, &mut out);
+    }
+    out
+}
+
+fn compute_layout_for_side(
+    config: &Config,
+    state: &AppState,
     side: Side,
     all_windows: &[Window],
     current_ws: u64,
     screen: (i32, i32),
-) -> Result<()> {
-    let panel = ctx.config.panel(side);
+    out: &mut Vec<(u64, ExpectedLayout)>,
+) {
+    let panel = config.panel(side);
     if !panel.enabled {
-        return Ok(());
+        return;
     }
 
-    let panel_state = ctx.state.panel(side);
+    let panel_state = state.panel(side);
     let ids: Vec<u64> = panel_state.windows.iter().map(|w| w.id).collect();
 
     let mut windows: Vec<_> = all_windows
@@ -117,7 +182,7 @@ fn reorder_side<C: NiriClient>(
 
     let n = windows.len();
     if n == 0 {
-        return Ok(());
+        return;
     }
 
     let (_, screen_h) = screen;
@@ -127,13 +192,13 @@ fn reorder_side<C: NiriClient>(
     // Layout bottom-up: first window at the bottom, subsequent windows stacked
     // above with `gap` between them.
     for (i, window) in windows.iter().enumerate() {
-        let width = resolve_width(window, panel, ctx);
+        let width = resolve_width(window, panel, &config.window_rule);
         let dims = WindowTarget { width, height: per_height };
 
         let active_peek = if window.is_focused {
-            resolve_rule_focus_peek(&ctx.config.window_rule, window, panel.get_focus_peek())
+            resolve_rule_focus_peek(&config.window_rule, window, panel.get_focus_peek())
         } else {
-            resolve_rule_peek(&ctx.config.window_rule, window, panel.peek)
+            resolve_rule_peek(&config.window_rule, window, panel.peek)
         };
 
         let stack_y = screen_h
@@ -142,34 +207,59 @@ fn reorder_side<C: NiriClient>(
             - (i as i32) * (per_height + gap);
 
         let (target_x, target_y) = calculate_coordinates(
-            side,
-            panel,
-            panel_state,
-            dims,
-            screen,
-            stack_y,
-            active_peek,
+            side, panel, panel_state, dims, screen, stack_y, active_peek,
         );
 
-        // Size each panel window to the computed per-window height + resolved
-        // width. niri ignores redundant size requests so this is cheap on
-        // unchanged layouts.
-        let _ = ctx.socket.send_action(Action::SetWindowWidth {
-            change: SizeChange::SetFixed(width),
-            id: Some(window.id),
-        });
-        let _ = ctx.socket.send_action(Action::SetWindowHeight {
-            change: SizeChange::SetFixed(per_height),
-            id: Some(window.id),
-        });
+        out.push((
+            window.id,
+            ExpectedLayout {
+                x: target_x,
+                y: target_y,
+                width,
+                height: per_height,
+            },
+        ));
+    }
+}
 
-        let _ = ctx.socket.send_action(Action::MoveFloatingWindow {
-            id: Some(window.id),
-            x: PositionChange::SetFixed(target_x.into()),
-            y: PositionChange::SetFixed(target_y.into()),
+fn apply_layouts<C: NiriClient>(socket: &mut C, layouts: &[(u64, ExpectedLayout)]) {
+    for (id, layout) in layouts {
+        // niri ignores redundant size requests so this is cheap on unchanged
+        // layouts.
+        let _ = socket.send_action(Action::SetWindowWidth {
+            change: SizeChange::SetFixed(layout.width),
+            id: Some(*id),
+        });
+        let _ = socket.send_action(Action::SetWindowHeight {
+            change: SizeChange::SetFixed(layout.height),
+            id: Some(*id),
+        });
+        let _ = socket.send_action(Action::MoveFloatingWindow {
+            id: Some(*id),
+            x: PositionChange::SetFixed(layout.x.into()),
+            y: PositionChange::SetFixed(layout.y.into()),
         });
     }
+}
 
+fn reorder_side<C: NiriClient>(
+    ctx: &mut Ctx<C>,
+    side: Side,
+    all_windows: &[Window],
+    current_ws: u64,
+    screen: (i32, i32),
+) -> Result<()> {
+    let mut layouts = Vec::new();
+    compute_layout_for_side(
+        &ctx.config,
+        &ctx.state,
+        side,
+        all_windows,
+        current_ws,
+        screen,
+        &mut layouts,
+    );
+    apply_layouts(&mut ctx.socket, &layouts);
     Ok(())
 }
 
@@ -616,5 +706,117 @@ mod tests {
 
         reorder(&mut ctx).unwrap();
         assert!(ctx.socket.sent_actions.is_empty());
+    }
+
+    fn reported_at(pos: Option<(f64, f64)>, size: (i32, i32)) -> WindowLayout {
+        WindowLayout {
+            window_size: size,
+            pos_in_scrolling_layout: None,
+            tile_size: (0.0, 0.0),
+            tile_pos_in_workspace_view: pos,
+            window_offset_in_tile: (0.0, 0.0),
+        }
+    }
+
+    #[test]
+    fn test_check_layout_exact_match() {
+        let expected = ExpectedLayout { x: 100, y: 200, width: 300, height: 400 };
+        let reported = reported_at(Some((100.0, 200.0)), (300, 400));
+        assert_eq!(check_layout(&expected, &reported), LayoutCheck::Match);
+    }
+
+    #[test]
+    fn test_check_layout_subpixel_drift_within_tolerance() {
+        let expected = ExpectedLayout { x: 100, y: 200, width: 300, height: 400 };
+        // 0.5px drift on both axes — below the 1.0px threshold.
+        let reported = reported_at(Some((100.5, 199.5)), (300, 400));
+        assert_eq!(check_layout(&expected, &reported), LayoutCheck::Match);
+    }
+
+    #[test]
+    fn test_check_layout_position_drift() {
+        let expected = ExpectedLayout { x: 100, y: 200, width: 300, height: 400 };
+        // 5px shift on x — clearly a user move.
+        let reported = reported_at(Some((105.0, 200.0)), (300, 400));
+        assert_eq!(check_layout(&expected, &reported), LayoutCheck::Drift);
+    }
+
+    #[test]
+    fn test_check_layout_size_drift() {
+        let expected = ExpectedLayout { x: 100, y: 200, width: 300, height: 400 };
+        // Width changed by 50 — user resized.
+        let reported = reported_at(Some((100.0, 200.0)), (350, 400));
+        assert_eq!(check_layout(&expected, &reported), LayoutCheck::Drift);
+    }
+
+    #[test]
+    fn test_check_layout_position_at_threshold_drifts() {
+        let expected = ExpectedLayout { x: 100, y: 200, width: 300, height: 400 };
+        // Exactly 1.0px — at the threshold counts as drift.
+        let reported = reported_at(Some((101.0, 200.0)), (300, 400));
+        assert_eq!(check_layout(&expected, &reported), LayoutCheck::Drift);
+    }
+
+    #[test]
+    fn test_check_layout_insufficient_when_pos_missing() {
+        let expected = ExpectedLayout { x: 100, y: 200, width: 300, height: 400 };
+        // niri didn't report a workspace-view position — can't check.
+        let reported = reported_at(None, (300, 400));
+        assert_eq!(check_layout(&expected, &reported), LayoutCheck::Insufficient);
+    }
+
+    #[test]
+    fn test_compute_layouts_returns_one_entry_per_panel_window() {
+        // Two windows tracked on right, computed layouts should have two entries
+        // matching what reorder applies.
+        let w1 = mock_window(1, false, true, 1, None);
+        let w2 = mock_window(2, false, true, 1, None);
+        let state = AppState {
+            right: panel_state_with(vec![win_state(1), win_state(2)]),
+            ..Default::default()
+        };
+        let layouts = compute_layouts(&mock_config(), &state, &[w1, w2], 1, (1920, 1080));
+
+        assert_eq!(layouts.len(), 2);
+        // N=2: per_height = (980 - 10) / 2 = 485
+        // bottom (id=1): y = 1080 - 50 - 485 = 545
+        // top    (id=2): y = 545 - 10 - 485 = 50
+        assert_eq!(
+            layouts.iter().find(|(id, _)| *id == 1).unwrap().1,
+            ExpectedLayout { x: 1600, y: 545, width: 300, height: 485 }
+        );
+        assert_eq!(
+            layouts.iter().find(|(id, _)| *id == 2).unwrap().1,
+            ExpectedLayout { x: 1600, y: 50, width: 300, height: 485 }
+        );
+    }
+
+    #[test]
+    fn test_compute_layouts_skips_other_workspace_windows() {
+        let w_here = mock_window(1, false, true, 1, None);
+        let w_else = mock_window(2, false, true, 99, None);
+        let state = AppState {
+            right: panel_state_with(vec![win_state(1), win_state(2)]),
+            ..Default::default()
+        };
+        let layouts = compute_layouts(&mock_config(), &state, &[w_here, w_else], 1, (1920, 1080));
+        // Only id=1 is on workspace 1, so it gets a layout. id=2 is off-workspace
+        // and excluded — n becomes 1, so id=1 fills the panel.
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0].0, 1);
+        assert_eq!(layouts[0].1.height, 980);
+    }
+
+    #[test]
+    fn test_compute_layouts_skips_disabled_panel() {
+        let w1 = mock_window(1, false, true, 1, None);
+        let mut config = mock_config();
+        config.right.enabled = false;
+        let state = AppState {
+            right: panel_state_with(vec![win_state(1)]),
+            ..Default::default()
+        };
+        let layouts = compute_layouts(&config, &state, &[w1], 1, (1920, 1080));
+        assert!(layouts.is_empty());
     }
 }
