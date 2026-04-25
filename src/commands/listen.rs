@@ -1,15 +1,16 @@
 use crate::commands::movefrom::move_to;
 use crate::commands::reorder;
+use crate::commands::reorder::{LayoutCheck, check_layout, compute_layouts};
 use crate::commands::togglewindow::add_to_panel;
 use crate::config::{Side, load_config};
 use crate::niri::connect;
 use crate::state::{get_default_cache_dir, load_state, save_state};
-use crate::window_rules::{resolve_auto_add_side};
+use crate::window_rules::resolve_auto_add_side;
 use crate::{Ctx, NiriClient};
 use anyhow::Result;
 use fslock::LockFile;
 use niri_ipc::socket::Socket;
-use niri_ipc::{Event, Request, Window};
+use niri_ipc::{Event, Request, Window, WindowLayout};
 
 pub fn listen(mut ctx: Ctx<Socket>) -> Result<()> {
     let _ = ctx.socket.send(Request::EventStream)?;
@@ -22,6 +23,7 @@ pub fn listen(mut ctx: Ctx<Socket>) -> Result<()> {
             Event::WindowFocusChanged { .. } => handle_focus_change()?,
             Event::WorkspaceActivated { id, focused: true } => handle_workspace_focus(id)?,
             Event::WindowOpenedOrChanged { window } => handle_new_window(&window)?,
+            Event::WindowLayoutsChanged { changes } => handle_window_layouts_changed(changes)?,
             _ => {}
         }
     }
@@ -66,6 +68,11 @@ fn handle_workspace_focus(ws_id: u64) -> Result<()> {
 fn handle_new_window(window: &Window) -> Result<()> {
     let (mut ctx, _lock) = get_ctx()?;
     process_new_window(&mut ctx, window)
+}
+
+fn handle_window_layouts_changed(changes: Vec<(u64, WindowLayout)>) -> Result<()> {
+    let (mut ctx, _lock) = get_ctx()?;
+    process_window_layouts_changed(&mut ctx, &changes)
 }
 
 pub fn process_close<C: NiriClient>(ctx: &mut Ctx<C>, closed_id: u64) -> Result<()> {
@@ -132,6 +139,67 @@ pub fn process_new_window<C: NiriClient>(ctx: &mut Ctx<C>, window: &Window) -> R
     };
 
     add_to_panel(ctx, side, window)?;
+    save_state(&ctx.state, &ctx.cache_dir)?;
+    reorder(ctx)?;
+    Ok(())
+}
+
+/// Detect user moves/resizes of panel windows and eject them. Compares each
+/// reported layout against what the daemon would have computed for that
+/// window in its panel slot; drift beyond `LAYOUT_TOLERANCE_PX` means the
+/// user nudged it, so we drop it from panel tracking and re-stack the rest.
+pub fn process_window_layouts_changed<C: NiriClient>(
+    ctx: &mut Ctx<C>,
+    changes: &[(u64, WindowLayout)],
+) -> Result<()> {
+    // Quick path: if no changed window is currently panel-tracked, we have
+    // nothing to compare against and can skip the niri queries entirely.
+    let any_tracked = changes
+        .iter()
+        .any(|(id, _)| ctx.state.side_of(*id).is_some());
+    if !any_tracked {
+        return Ok(());
+    }
+
+    let screen = ctx.socket.get_screen_dimensions()?;
+    let current_ws = ctx.socket.get_active_workspace()?.id;
+    let all_windows = ctx.socket.get_windows()?;
+
+    let expected = compute_layouts(&ctx.config, &ctx.state, &all_windows, current_ws, screen);
+
+    let mut to_eject: Vec<(Side, u64)> = Vec::new();
+    for (id, reported) in changes {
+        let Some(side) = ctx.state.side_of(*id) else {
+            continue;
+        };
+        let Some((_, expected_layout)) = expected.iter().find(|(eid, _)| eid == id) else {
+            // Window is panel-tracked but not in the computed layout — likely
+            // on a different workspace right now. Skip.
+            continue;
+        };
+        if matches!(check_layout(expected_layout, reported), LayoutCheck::Drift) {
+            println!(
+                "Panel {:?} window {} drifted from expected layout. Ejecting.",
+                side, id
+            );
+            to_eject.push((side, *id));
+        }
+    }
+
+    if to_eject.is_empty() {
+        return Ok(());
+    }
+
+    for (side, id) in &to_eject {
+        let panel_state = ctx.state.panel_mut(*side);
+        if let Some(index) = panel_state.windows.iter().position(|w| w.id == *id) {
+            panel_state.windows.remove(index);
+        }
+        // Mark the id as ignored so the listener's auto-add path doesn't
+        // immediately re-panelize the window from any side-effect events.
+        ctx.state.ignored_windows.push(*id);
+    }
+
     save_state(&ctx.state, &ctx.cache_dir)?;
     reorder(ctx)?;
     Ok(())
@@ -383,5 +451,195 @@ mod tests {
         assert_eq!(ctx.state.right.windows.len(), 0);
         assert!(!ctx.state.ignored_windows.contains(&100));
         assert!(ctx.socket.sent_actions.is_empty());
+    }
+
+    fn reported_at(pos: Option<(f64, f64)>, size: (i32, i32)) -> WindowLayout {
+        WindowLayout {
+            window_size: size,
+            pos_in_scrolling_layout: None,
+            tile_size: (0.0, 0.0),
+            tile_pos_in_workspace_view: pos,
+            window_offset_in_tile: (0.0, 0.0),
+        }
+    }
+
+    fn ws_state(id: u64) -> WindowState {
+        WindowState {
+            id,
+            width: 1000,
+            height: 800,
+            is_floating: false,
+            position: None,
+        }
+    }
+
+    #[test]
+    fn test_wlc_no_panel_tracked_windows_is_noop() {
+        // Given: empty AppState (no tracked windows in either panel) and a
+        // WLC event for an arbitrary unknown window.
+        let temp_dir = tempdir().unwrap();
+        let mock = MockNiri::new(vec![]);
+        let mut ctx = Ctx {
+            state: AppState::default(),
+            config: crate::test_utils::mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+        let changes = vec![(42, reported_at(Some((100.0, 200.0)), (300, 400)))];
+
+        // When: we process the event.
+        process_window_layouts_changed(&mut ctx, &changes).expect("WLC failed");
+
+        // Then: nothing changes — no actions sent, no state mutated. The
+        // short-circuit avoids paying for the niri queries.
+        assert!(ctx.socket.sent_actions.is_empty());
+        assert!(ctx.state.right.windows.is_empty());
+    }
+
+    #[test]
+    fn test_wlc_matching_layout_does_not_eject() {
+        // Given: a single window tracked by the right panel at the position
+        // and size the daemon would itself compute (1-window layout:
+        // x=1600, y=50, w=300, h=980).
+        let temp_dir = tempdir().unwrap();
+        let w1 = mock_window(1, false, true, 1, Some((1600.0, 50.0)));
+        let mock = MockNiri::new(vec![w1]);
+        let mut state = AppState::default();
+        state.right.windows.push(ws_state(1));
+        let mut ctx = Ctx {
+            state,
+            config: crate::test_utils::mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+        let changes = vec![(1, reported_at(Some((1600.0, 50.0)), (300, 980)))];
+
+        // When: niri reports back the same layout we just imposed (our own echo).
+        process_window_layouts_changed(&mut ctx, &changes).expect("WLC failed");
+
+        // Then: the window stays tracked and isn't pushed into ignored_windows.
+        assert_eq!(ctx.state.right.windows.len(), 1, "window must remain tracked");
+        assert!(!ctx.state.ignored_windows.contains(&1));
+    }
+
+    #[test]
+    fn test_wlc_drift_position_ejects() {
+        // Given: a tracked panel window whose niri-reported position is far
+        // from the panel's expected slot — simulating a user drag.
+        let temp_dir = tempdir().unwrap();
+        let w1 = mock_window(1, false, true, 1, Some((400.0, 300.0)));
+        let mock = MockNiri::new(vec![w1]);
+        let mut state = AppState::default();
+        state.right.windows.push(ws_state(1));
+        let mut ctx = Ctx {
+            state,
+            config: crate::test_utils::mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+        let changes = vec![(1, reported_at(Some((400.0, 300.0)), (300, 980)))];
+
+        // When: the WLC handler runs.
+        process_window_layouts_changed(&mut ctx, &changes).expect("WLC failed");
+
+        // Then: the window is ejected from panel tracking and added to
+        // ignored_windows so the listener doesn't auto-re-add it.
+        assert!(ctx.state.right.windows.is_empty(), "drifted window must be ejected");
+        assert!(ctx.state.ignored_windows.contains(&1));
+    }
+
+    #[test]
+    fn test_wlc_drift_size_ejects() {
+        // Given: a tracked window at its expected position but with a
+        // user-resized width (300 → 500).
+        let temp_dir = tempdir().unwrap();
+        let w1 = mock_window(1, false, true, 1, Some((1600.0, 50.0)));
+        let mock = MockNiri::new(vec![w1]);
+        let mut state = AppState::default();
+        state.right.windows.push(ws_state(1));
+        let mut ctx = Ctx {
+            state,
+            config: crate::test_utils::mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+        let changes = vec![(1, reported_at(Some((1600.0, 50.0)), (500, 980)))];
+
+        // When: the WLC handler runs.
+        process_window_layouts_changed(&mut ctx, &changes).expect("WLC failed");
+
+        // Then: a resize triggers an eject just like a move does.
+        assert!(ctx.state.right.windows.is_empty());
+        assert!(ctx.state.ignored_windows.contains(&1));
+    }
+
+    #[test]
+    fn test_wlc_drift_ejected_remaining_windows_reorder() {
+        // Given: two tracked windows in the right panel; the first at its
+        // 2-window expected slot and the second visibly dragged off.
+        let temp_dir = tempdir().unwrap();
+        let w1 = mock_window(1, false, true, 1, Some((1600.0, 545.0)));
+        let w2 = mock_window(2, false, true, 1, Some((400.0, 300.0)));
+        let mock = MockNiri::new(vec![w1, w2]);
+        let mut state = AppState::default();
+        state.right.windows.push(ws_state(1));
+        state.right.windows.push(ws_state(2));
+        let mut ctx = Ctx {
+            state,
+            config: crate::test_utils::mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+        let changes = vec![
+            (1, reported_at(Some((1600.0, 545.0)), (300, 485))),
+            (2, reported_at(Some((400.0, 300.0)), (300, 485))),
+        ];
+
+        // When: the WLC handler processes both reports.
+        process_window_layouts_changed(&mut ctx, &changes).expect("WLC failed");
+
+        // Then: id=2 is ejected and id=1 re-stacks to fill the panel —
+        // height becomes the 1-window value of 980.
+        assert_eq!(ctx.state.right.windows.len(), 1);
+        assert_eq!(ctx.state.right.windows[0].id, 1);
+        let actions = &ctx.socket.sent_actions;
+        assert!(
+            actions.iter().any(|a| matches!(a,
+                niri_ipc::Action::SetWindowHeight {
+                    change: niri_ipc::SizeChange::SetFixed(980),
+                    id: Some(1)
+                }
+            )),
+            "remaining window must re-stack to fill the panel"
+        );
+    }
+
+    #[test]
+    fn test_wlc_unknown_window_ignored() {
+        // Given: a tracked window in the right panel and a WLC report for a
+        // completely different window id (999) that no panel tracks.
+        let temp_dir = tempdir().unwrap();
+        let w1 = mock_window(1, false, true, 1, Some((1600.0, 50.0)));
+        let mock = MockNiri::new(vec![w1]);
+
+        let mut state = AppState::default();
+        state.right.windows.push(ws_state(1));
+        let mut ctx = Ctx {
+            state,
+            config: crate::test_utils::mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+
+        let changes = vec![(999, reported_at(Some((42.0, 42.0)), (1, 1)))];
+
+        // When: the WLC handler runs against a layout that would mismatch if
+        // 999 were tracked.
+        process_window_layouts_changed(&mut ctx, &changes).expect("WLC failed");
+
+        // Then: the unknown window is silently ignored — the tracked window
+        // stays put and 999 is not pushed to ignored_windows.
+        assert_eq!(ctx.state.right.windows.len(), 1);
+        assert!(!ctx.state.ignored_windows.contains(&999));
     }
 }
