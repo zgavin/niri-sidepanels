@@ -1,107 +1,70 @@
-# niri-sidebar
+# niri-sidepanels
 
-A lightweight, external sidebar manager for the [Niri](https://github.com/YaLTeR/niri) window manager.
+A lightweight, external sidepanel manager for the [niri](https://github.com/YaLTeR/niri) window manager.
 
-`niri-sidebar` allows you to toggle any window into a "floating sidebar" stack on the right side of your screen. It automatically handles resizing, positioning, and stacking, keeping your main workspace clean while keeping utility apps (terminals, music players, chats) accessible.
+`niri-sidepanels` lets you toggle any window into one of two independent floating sidepanel stacks — one anchored to the left edge of the screen, the other to the right. Stacks divide the available vertical space equally between their windows, so you can keep utility apps (terminals, music players, chats) accessible alongside the regular niri scrolling tape.
 
-https://github.com/user-attachments/assets/46f51b18-d85b-4d79-9c44-63e63649707a
+This project is a fork of [Vigintillionn/niri-sidebar](https://github.com/Vigintillionn/niri-sidebar), extended to support two independent panels instead of a single sidebar.
 
 ## Features
 
-- **Toggle Windows:** Instantly move the focused window into the sidebar stack.
-- **Auto-Stacking:** Windows automatically stack vertically with a configurable gap.
-- **Smart Close:** Closing a sidebar window automatically reorders the remaining windows to fill the gap.
-- **Flip & Hide:** Flip the stack to the other side of the screen or hide it completely (peeking mode).
-- **State Persistence:** Remembers your sidebar windows and their original sizes even if you restart the tool.
+- **Dual independent panels:** A left and a right panel, each with its own width, margins, peek behavior, and window rules. Either can be enabled/disabled independently.
+- **Equal-height stacking:** Windows in a panel divide the panel's vertical space equally, with a configurable gap between them.
+- **Send across panels:** Move a window directly between panels, back to the niri tape, or detach it as a free-floating window.
+- **Flip & hide:** Reverse the stacking order or hide a panel entirely (it peeks back in by a configurable amount so you know it's there).
+- **Sticky panels:** Optionally have a panel's windows follow you across workspaces.
+- **Window rules:** Auto-add specific applications (matched by `app_id` / `title` regex) to a chosen panel; override per-window width, peek, and focus_peek.
+- **State persistence:** Tracking lists survive restarts.
 
 ## Installation
 
-### Option 1: Download Binary (Recommended)
-
-1.  Go to the [Releases](https://github.com/Vigintillionn/niri-sidebar/releases) page.
-2.  Download the binary matching your architecture (e.g., `niri-sidebar-linux-x86_64`).
-3.  Rename it to `niri-sidebar`, make it executable, and move it to your path:
+Build from source:
 
 ```bash
-# Example for x86_64
-mv niri-sidebar-linux-x86_64 niri-sidebar
-chmod +x niri-sidebar
-
-# Move to a directory in your PATH
-sudo mv niri-sidebar /usr/local/bin/
-# OR for a local installation:
-mkdir -p ~/.local/bin
-mv niri-sidebar ~/.local/bin/
-```
-
-### Option 2: Build from Source
-
-```bash
-git clone https://github.com/Vigintillionn/niri-sidebar
-cd niri-sidebar
+git clone https://github.com/zgavin/niri-sidepanels
+cd niri-sidepanels
 cargo build --release
-cp target/release/niri-sidebar ~/.local/bin/
+cp target/release/niri-sidepanels ~/.local/bin/
 ```
 
-### Option 3: Arch Linux (AUR)
+## niri configuration
 
-An unofficial AUR package is available:
-```bash
-yay -S niri-sidebar-git
-```
-> **Note:** This package is community-maintained on the AUR and is not officially maintained by the niri-sidebar project. Please review the PKGBUILD before installing.
-
-### Option 4: Void Linux (`xbps-src`)
-
-A Void Linux package is available as a template in the official [`void-packages`](https://github.com/void-linux/void-packages) repository.
-
-1. Clone the `void-packages` repository (if you haven’t already):
-```bash
-git clone https://github.com/void-linux/void-packages.git
-cd void-packages
-./xbps-src binary-bootstrap
-```
-2. Build the `niri-sidebar` package
-```bash
-./xbps-src pkg niri-sidebar
-```
-3. Install the `niri-sidebar` package
-```bash
-sudo xbps-install --repository=hostdir/binpkgs niri-sidebar
-```
-> **Note:** This package is community-maintained in the Void Linux community repository and is not officially maintained by the niri-sidebar project. Please review the template before installing.
-
-## Niri configuration
-
-Add the following bindings to your niri `config.kdl` file.
-
-**Important:** These examples assume you installed the tool to `~/.local/bin`. If you installed it elsewhere, update the paths accordingly.
+Add bindings to your niri `config.kdl`. The examples below assume the binary is at `~/.local/bin/niri-sidepanels`.
 
 ```kdl
 binds {
-    // Toggle the focused window into/out of the sidebar
-    Mod+S { spawn-sh "~/.local/bin/niri-sidebar toggle-window"; }
+    // Toggle the focused window into/out of a panel
+    Mod+S         { spawn-sh "~/.local/bin/niri-sidepanels toggle-window right"; }
+    Mod+A         { spawn-sh "~/.local/bin/niri-sidepanels toggle-window left"; }
 
-    // Toggle sidebar visibility (hide/show)
-    Mod+Shift+S { spawn-sh "~/.local/bin/niri-sidebar toggle-visibility"; }
+    // Send the focused window to a specific destination (does not toggle)
+    Mod+Shift+Right { spawn-sh "~/.local/bin/niri-sidepanels send right"; }
+    Mod+Shift+Left  { spawn-sh "~/.local/bin/niri-sidepanels send left"; }
+    // `center` un-floats and returns the window to the niri tape
+    Mod+Shift+C     { spawn-sh "~/.local/bin/niri-sidepanels send center"; }
+    // `floating` detaches from panel tracking but leaves the window floating
+    Mod+Shift+F     { spawn-sh "~/.local/bin/niri-sidepanels send floating"; }
 
-    // Flip the order of the sidebar
-    Mod+Ctrl+S { spawn-sh "~/.local/bin/niri-sidebar flip"; }
+    // Hide / show a panel (peek still visible)
+    Mod+Shift+S { spawn-sh "~/.local/bin/niri-sidepanels toggle-visibility right"; }
+    Mod+Shift+A { spawn-sh "~/.local/bin/niri-sidepanels toggle-visibility left"; }
 
-    // Force reorder (useful if something gets misaligned manually)
-    Mod+Alt+R { spawn-sh "~/.local/bin/niri-sidebar reorder"; }
+    // Reverse the stacking order of a panel
+    Mod+Ctrl+S { spawn-sh "~/.local/bin/niri-sidepanels flip right"; }
+    Mod+Ctrl+A { spawn-sh "~/.local/bin/niri-sidepanels flip left"; }
+
+    // Force re-stacking on both panels (useful after manual nudges)
+    Mod+Alt+R { spawn-sh "~/.local/bin/niri-sidepanels reorder"; }
 }
 ```
 
-In order for your sidebar to stay consistent and gap free, you want to add the following to your startup scripts
+To keep panels reactive to window events (close, focus change, workspace switch), spawn the listener daemon at startup:
 
 ```kdl
-spawn-at-startup "~/.local/bin/niri-sidebar" "listen"
+spawn-at-startup "~/.local/bin/niri-sidepanels" "listen"
 ```
 
-This will spawn a daemon to listen for window close events and reorder the sidebar if the closed window was part of it.
-
-Some applications enforce a minimum window size that is larger than your sidebar configuration, which can cause windows to overlap or look broken. Add this rule to force them to respect the sidebar size:
+Some applications enforce a minimum window size larger than your panel width, which can cause overlap. Add a niri window rule to bound them:
 
 ```kdl
 window-rule {
@@ -113,69 +76,94 @@ window-rule {
 
 ## Configuration
 
-Run `niri-sidebar init` to generate a `config.toml` file located at `~/.config/niri-sidebar`.
+Run `niri-sidepanels init` to generate `~/.config/niri-sidepanels/config.toml` with defaults.
 
-#### Default Config
+### Default config
 
 ```toml
-# niri-sidebar configuration
+# niri-sidepanels configuration
+#
+# Two independent panels are supported: `[left]` and `[right]`. Each one has
+# its own width, margins, peek behavior, and window rules. Disable either by
+# setting `enabled = false` in its section.
 
-[geometry]
-# Width of the sidebar in pixels
+[left]
+enabled = false
 width = 400
-# Height of the sidebar windows
+# Deprecated: ignored since windows now split available vertical space
+# equally. Kept in the schema for forward compatibility.
 height = 335
-# Gap between windows in the stack
+# Gap between stacked windows, in pixels.
 gap = 10
+# How much of the panel peeks in from the edge when hidden, in pixels.
+peek = 10
+# How much of the panel is visible when a panel window is focused. Defaults
+# to `peek`. Set equal to `width + margins.left` to fully unhide on focus.
+focus_peek = 50
+# Whether the panel's windows follow you when you switch workspaces.
+sticky = false
 
-[margins]
-# Margins are default to 0 if left out
-# Space from the top of the screen
+[left.margins]
 top = 50
-# Space from the right edge of the screen
 right = 10
-# Space from the left edge of the screen
 left = 10
-# Space from the bottom of the screen
 bottom = 10
 
-[interaction]
-# Where to put the sidebar, can be "left", "right", "top" or "bottom"
-# Defaults to "right"
-position = "right"
-# Width of windows when sidebar is hidden in pixels
+[right]
+enabled = true
+width = 400
+height = 335
+gap = 10
 peek = 10
-# Width of window when sidebar is hidden but window is focused in pixels
-# set this equal to peek to disable this feature
-# set this equal to sidebar_width + offset_right to make focused windows "unhide"
-# Optional and defaults to peek if ommitted
 focus_peek = 50
-# Whether the sidebar should follow if you switch workspaces
 sticky = false
+
+[right.margins]
+top = 50
+right = 10
+left = 10
+bottom = 10
 ```
 
-#### Window Rules
+### Window rules
 
-Window rules allow you to customize behavior for specific windows based on their `app_id` or `title`. Rules are evaluated in order, and the first matching rule is applied. If a field is omitted in a rule, the global default configuration is used.
+Window rules let you customize behavior for specific windows by `app_id` or `title`. Rules are evaluated in order; the first match applies. Omitted fields fall back to the panel's defaults.
 
 ```toml
-# Example window rule
-# all fields are optional if not given a default from other configs will be used
 [[window_rule]]
-app_id = "firefox"  # regex, if not set will match all app_id's
-title = "^Picture-in-Picture$"  # regex, if not set will match no matter the title
+app_id = "firefox"            # regex; if omitted, matches any app_id
+title = "^Picture-in-Picture$" # regex; if omitted, matches any title
 width = 700
-height = 400
-focus_peek = 710
 peek = 10
-auto_add = true  # defaults to false
+focus_peek = 710
+auto_add = true                # default false; auto-adds matching windows
+side = "right"                 # which panel to auto-add to; defaults to right
 ```
+
+Note: the `height` field on a window rule is ignored — panel windows divide the panel's vertical space equally regardless. Width still applies.
+
+## Commands
+
+| Command | Description |
+| --- | --- |
+| `toggle-window <left\|right>` | Toggle the focused window into or out of the named panel. Toggling out un-floats and returns it to the tape. |
+| `send <left\|right\|center\|floating>` | Send the focused window to a specific destination (non-toggling). `center` un-floats back to the tape; `floating` detaches from panel tracking but leaves the window floating where it is. |
+| `toggle-visibility <left\|right>` | Hide or show the named panel. Hidden panels still peek in. |
+| `flip <left\|right>` | Reverse the stacking order of the named panel. |
+| `focus <left\|right> [next\|prev]` | Cycle focus through windows in the named panel. |
+| `reorder` | Force re-stacking of both panels. Useful after manual nudges. |
+| `close` | Close the focused window; if it was on a panel, drop tracking. |
+| `move-from <left\|right> <workspace>` | Move all windows tracked by the named panel from workspace N to the current workspace. |
+| `init` | Write a default `config.toml` if one doesn't already exist. |
+| `listen` | Run the daemon that watches niri events and keeps panels in sync. |
 
 ## Workflow tips
 
-- **Adding/Removing:** Press `Mod+S` on any window to snap it into the sidebar. Press it again to return it to your normal tiling layout.
-- **Hiding:** Press `Mod+Shift+S` to tuck the sidebar away. It will stick out slightly (configured by peek) so you know it's there.
+- **Adding/removing:** `Mod+S` snaps the focused window into the right panel; press again to send it back to the tape.
+- **Cross-panel move:** `niri-sidepanels send left` (or right) on a panel-tracked window moves it across without un-floating.
+- **Detach without re-tiling:** `niri-sidepanels send floating` pops a window out of its panel slot but keeps it floating at its current size — handy for one-off tasks where you don't want it back in the scrolling tape yet.
+- **Hiding:** `Mod+Shift+S` tucks the right panel away. The configured `peek` keeps a thin sliver visible so you know it's there.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT — see [LICENSE](LICENSE).

@@ -12,13 +12,16 @@ pub fn toggle_window<C: NiriClient>(ctx: &mut Ctx<C>, side: Side) -> Result<()> 
 
     match ctx.state.side_of(focused.id) {
         Some(existing) if existing == side => {
-            // Already on this side — remove it.
-            remove_from_panel(ctx, existing, &focused)?;
+            // Already on this side — remove it and send back to the tape.
+            remove_to_tape(ctx, existing, &focused)?;
         }
         Some(other) => {
-            // On the other panel — move it over.
-            remove_from_panel(ctx, other, &focused)?;
+            // On the other panel — move it over. Use the floating-preserving
+            // path so add_to_panel can take over sizing without fighting a
+            // restore-and-reapply round-trip.
+            remove_to_floating(ctx, other, &focused)?;
             add_to_panel(ctx, side, &focused)?;
+            ctx.state.ignored_windows.retain(|id| *id != focused.id);
         }
         None => {
             add_to_panel(ctx, side, &focused)?;
@@ -65,53 +68,62 @@ pub fn add_to_panel<C: NiriClient>(ctx: &mut Ctx<C>, side: Side, window: &Window
     Ok(())
 }
 
-pub(crate) fn remove_from_panel<C: NiriClient>(
-    ctx: &mut Ctx<C>,
-    side: Side,
-    window: &Window,
-) -> Result<()> {
+/// Remove the window from the given side's tracking list without its id from
+/// being auto-re-added by the listener.
+fn drop_from_tracking<C: NiriClient>(ctx: &mut Ctx<C>, side: Side, id: u64) -> WindowState {
     let panel_state = ctx.state.panel_mut(side);
     let index = panel_state
         .windows
         .iter()
-        .position(|w| w.id == window.id)
-        .expect("remove_from_panel called with a window not on that side");
-
+        .position(|w| w.id == id)
+        .expect("drop_from_tracking called with a window not on that side");
     let w_state = panel_state.windows.remove(index);
     ctx.state.ignored_windows.push(w_state.id);
+    w_state
+}
+
+/// Remove the window from the panel and return it to the niri tape: restore
+/// its original size and un-float it. Used for `send center` and for
+/// `toggle-window` toggling a window off its panel.
+pub(crate) fn remove_to_tape<C: NiriClient>(
+    ctx: &mut Ctx<C>,
+    side: Side,
+    window: &Window,
+) -> Result<()> {
+    let w_state = drop_from_tracking(ctx, side, window.id);
 
     let _ = ctx.socket.send_action(Action::SetWindowWidth {
         change: SizeChange::SetFixed(w_state.width),
         id: Some(window.id),
     });
-
     let _ = ctx.socket.send_action(Action::SetWindowHeight {
         change: SizeChange::SetFixed(w_state.height),
         id: Some(window.id),
     });
 
-    if window.is_floating && !w_state.is_floating {
+    if window.is_floating {
         let _ = ctx.socket.send_action(Action::ToggleWindowFloating {
             id: Some(window.id),
-        });
-    }
-
-    if let Some((x, y)) = w_state.position
-        && window.is_floating
-    {
-        let _ = ctx.socket.send_action(Action::MoveFloatingWindow {
-            id: Some(window.id),
-            x: niri_ipc::PositionChange::SetFixed(x),
-            y: niri_ipc::PositionChange::SetFixed(y),
         });
     }
 
     Ok(())
 }
 
+/// Remove the window from the panel but leave it floating exactly where it is,
+/// at whatever size it currently has. Used for `send floating` (user detach),
+/// for eject-on-user-move (v2), and as the removal half of cross-panel moves.
+pub(crate) fn remove_to_floating<C: NiriClient>(
+    ctx: &mut Ctx<C>,
+    side: Side,
+    window: &Window,
+) -> Result<()> {
+    drop_from_tracking(ctx, side, window.id);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use niri_ipc::PositionChange;
     use tempfile::tempdir;
 
     use super::*;
@@ -207,15 +219,14 @@ mod tests {
         assert!(ctx.state.ignored_windows.contains(&100));
 
         let actions = &ctx.socket.sent_actions;
+        // Size restored to the captured original.
         assert!(actions.iter().any(|a| matches!(a,
             Action::SetWindowWidth { change: SizeChange::SetFixed(1000), id: Some(100) }
         )));
+        // Un-floats even though w_state.is_floating was true — "to tape" is
+        // deliberately lossy and always returns the window to the tile layer.
         assert!(actions.iter().any(|a| matches!(a,
-            Action::MoveFloatingWindow {
-                id: Some(100),
-                x: PositionChange::SetFixed(1.0),
-                y: PositionChange::SetFixed(2.0)
-            }
+            Action::ToggleWindowFloating { id: Some(100) }
         )));
     }
 
