@@ -284,15 +284,24 @@ fn reorder_side<C: NiriClient>(
     apply_layouts(&mut ctx.socket, &layouts);
 
     // Mark each affected window as "still settling" so the WLC handler can
-    // distinguish niri's animation frames from real user moves. The
-    // cooldown deadline is the same for every window in this pass — they
-    // were all sent simultaneously and will animate in parallel.
+    // distinguish niri's animation frames from real user moves. *Only* mark
+    // windows whose layout actually changed — niri ignores no-op move/size
+    // actions and won't emit WLC events for them, so a blanket cooldown
+    // would wrongly suppress user drags after every focus change (which
+    // fires reorder but rarely changes any actual position).
     if !layouts.is_empty() {
         let cooldown_end = now_ms() + ctx.config.animation.cooldown_ms;
-        let layout_ids: HashSet<u64> = layouts.iter().map(|(id, _)| *id).collect();
         let panel_state = ctx.state.panel_mut(side);
-        for w in &mut panel_state.windows {
-            if layout_ids.contains(&w.id) {
+        for (id, expected) in &layouts {
+            let Some(window) = all_windows.iter().find(|w| w.id == *id) else {
+                continue;
+            };
+            // If niri's current layout already matches what we'd compute,
+            // no animation will run — skip the cooldown for this window.
+            if matches!(check_layout(expected, &window.layout), LayoutCheck::Match) {
+                continue;
+            }
+            if let Some(w) = panel_state.windows.iter_mut().find(|w| w.id == *id) {
                 w.cooldown_until = Some(cooldown_end);
             }
         }
@@ -951,8 +960,10 @@ mod tests {
     }
 
     #[test]
-    fn test_reorder_sets_cooldown_on_affected_windows() {
-        // Given: a tracked panel window with no cooldown set.
+    fn test_reorder_sets_cooldown_on_window_whose_layout_will_change() {
+        // Given: a tracked panel window whose niri-reported tile_pos is None
+        // (so check_layout returns Insufficient — not a Match). The conservative
+        // path treats this as "may animate" and sets cooldown.
         let temp_dir = tempdir().unwrap();
         let w1 = mock_window(1, false, true, 1, None);
         let mock = MockNiri::new(vec![w1]);
@@ -972,8 +983,8 @@ mod tests {
         reorder(&mut ctx).expect("reorder failed");
 
         // Then: the window's cooldown_until is set to a time roughly
-        // `cooldown_ms` (default 500) in the future. We allow some slack to
-        // account for clock granularity and test execution time.
+        // `cooldown_ms` (default 500) in the future. Slack covers clock
+        // granularity and test execution time.
         let cooldown = ctx.state.right.windows[0]
             .cooldown_until
             .expect("cooldown must be set after a reorder");
@@ -982,6 +993,43 @@ mod tests {
         assert!(
             cooldown >= expected_cooldown_lower && cooldown <= expected_cooldown_upper,
             "cooldown {cooldown} should land in [{expected_cooldown_lower}, {expected_cooldown_upper}]"
+        );
+    }
+
+    #[test]
+    fn test_reorder_skips_cooldown_when_layout_is_already_correct() {
+        // Given: a window already at the position and size compute_layouts
+        // would assign — niri.layout matches expected within ε. This is the
+        // common case for focus-change-driven reorders, which fire on every
+        // click but rarely actually change a panel window's layout.
+        let temp_dir = tempdir().unwrap();
+        let mut w1 = mock_window(1, false, true, 1, None);
+        // mock_config: 1-window right panel layout is x=1600, y=50, w=300, h=980.
+        w1.layout.tile_pos_in_workspace_view = Some((1600.0, 50.0));
+        w1.layout.window_size = (300, 980);
+        let mock = MockNiri::new(vec![w1]);
+        let state = AppState {
+            right: panel_state_with(vec![win_state(1)]),
+            ..Default::default()
+        };
+        let mut ctx = Ctx {
+            state,
+            config: mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+
+        // When: we run a full reorder.
+        reorder(&mut ctx).expect("reorder failed");
+
+        // Then: cooldown stays None — niri won't emit any WLC events for a
+        // no-op layout, so we have no animation frames to suppress.
+        // Critically this means a user drag that follows a focus-change
+        // reorder isn't blocked by a stale cooldown.
+        assert_eq!(
+            ctx.state.right.windows[0].cooldown_until,
+            None,
+            "cooldown must not be set when layout is already at expected"
         );
     }
 }
