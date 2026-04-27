@@ -6,6 +6,7 @@ use crate::state::save_state;
 use anyhow::Result;
 
 pub fn toggle_visibility<C: NiriClient>(ctx: &mut Ctx<C>, side: Side) -> Result<()> {
+    ctx.config.require_enabled(side)?;
     let panel_state = ctx.state.panel_mut(side);
     panel_state.is_hidden = !panel_state.is_hidden;
     save_state(&ctx.state, &ctx.cache_dir)?;
@@ -77,5 +78,26 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn test_toggle_visibility_errors_on_disabled_side() {
+        // Given: the left panel is disabled in mock_config.
+        let temp_dir = tempdir().unwrap();
+        let mock = MockNiri::new(vec![]);
+        let mut ctx = Ctx {
+            state: AppState::default(),
+            config: mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+
+        // When: we try to toggle visibility of the disabled left panel.
+        let result = toggle_visibility(&mut ctx, Side::Left);
+
+        // Then: error returned, panel state untouched, no socket actions sent.
+        assert!(result.is_err());
+        assert!(!ctx.state.left.is_hidden);
+        assert!(ctx.socket.sent_actions.is_empty());
     }
 }

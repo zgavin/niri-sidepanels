@@ -62,6 +62,24 @@ impl Config {
             Side::Right => &mut self.right,
         }
     }
+
+    /// Refuse to act on a panel that's disabled in config. Use this at the
+    /// start of every command that targets a side, so we surface a clear
+    /// error rather than silently leaving an orphaned floating window when a
+    /// keybind hits a disabled panel.
+    pub fn require_enabled(&self, side: Side) -> Result<&Panel> {
+        let panel = self.panel(side);
+        if !panel.enabled {
+            let name = match side {
+                Side::Left => "left",
+                Side::Right => "right",
+            };
+            anyhow::bail!(
+                "panel '{name}' is disabled in config — enable it under [{name}] to use this command"
+            );
+        }
+        Ok(panel)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
