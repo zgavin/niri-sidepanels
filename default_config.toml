@@ -4,6 +4,14 @@
 # Each one has its own width, margins, peek behavior, and window rules.
 # Disable either by setting `enabled = false` in its section.
 
+# Vertical space niri's working area excludes from the output — typically
+# layer-shell bars (waybar, etc.) plus any user-configured struts in your
+# niri config. niri-sidepanels can't detect these dynamically, so set them
+# manually here. Defaults to 0 / 0 if omitted.
+# [bars]
+# top = 30
+# bottom = 0
+
 [left]
 enabled = false
 # Panel width in pixels.
