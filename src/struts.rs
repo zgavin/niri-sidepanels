@@ -15,11 +15,6 @@ use niri_ipc::Action;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Trailing comment we attach to every `left` / `right` line we write so a
-/// human reading the niri config can see at a glance that a tool is editing
-/// these specific values.
-const MANAGED_TRAILING_COMMENT: &str = " // niri-sidepanels: managed";
-
 /// Suffix used for the one-time backup of the user's niri config the first
 /// time we touch it.
 const BACKUP_SUFFIX: &str = ".niri-sidepanels.bak";
@@ -38,8 +33,11 @@ pub fn update_struts_in_kdl(kdl_text: &str, updates: &[(Side, i32)]) -> Result<S
         return Ok(kdl_text.to_string());
     }
 
-    let mut doc: KdlDocument = kdl_text
-        .parse()
+    // niri uses KDL v1 syntax (via the `knuffel` crate), not the v2 default
+    // of the `kdl` crate. Use `parse_v1` for the input and `ensure_v1` +
+    // `to_string` for the output so the round-trip stays in v1 form niri
+    // can parse.
+    let mut doc = KdlDocument::parse_v1(kdl_text)
         .map_err(|e| anyhow::anyhow!("failed to parse niri config as KDL: {e}"))?;
 
     // Ensure `layout > struts` exists with reasonable formatting. We seed any
@@ -48,8 +46,7 @@ pub fn update_struts_in_kdl(kdl_text: &str, updates: &[(Side, i32)]) -> Result<S
     // (constructing nested `KdlNode::new(...)`s manually produces ugly output
     // like `layout{` with no space).
     if doc.get("layout").is_none() {
-        let scaffold: KdlDocument = "layout {\n    struts {\n    }\n}\n"
-            .parse()
+        let scaffold = KdlDocument::parse_v1("layout {\n    struts {\n    }\n}\n")
             .expect("layout scaffold must be valid KDL");
         for node in scaffold.nodes() {
             doc.nodes_mut().push(node.clone());
@@ -58,8 +55,7 @@ pub fn update_struts_in_kdl(kdl_text: &str, updates: &[(Side, i32)]) -> Result<S
     let layout = doc.get_mut("layout").expect("just ensured");
     let layout_children = layout.ensure_children();
     if layout_children.get("struts").is_none() {
-        let scaffold: KdlDocument = "    struts {\n    }\n"
-            .parse()
+        let scaffold = KdlDocument::parse_v1("    struts {\n    }\n")
             .expect("struts scaffold must be valid KDL");
         for node in scaffold.nodes() {
             layout_children.nodes_mut().push(node.clone());
@@ -88,6 +84,9 @@ pub fn update_struts_in_kdl(kdl_text: &str, updates: &[(Side, i32)]) -> Result<S
         upsert_managed_strut(struts_children, key, *value);
     }
 
+    // Convert the document representation back to v1 syntax before
+    // serializing, so niri (which only parses v1) can read the result.
+    doc.ensure_v1();
     Ok(doc.to_string())
 }
 
@@ -102,11 +101,11 @@ fn upsert_managed_strut(doc: &mut KdlDocument, key: &str, value: i32) {
         return;
     }
 
-    // New node: parse a template so the comment, spacing, and terminator are
-    // all handled by KDL's own parser/serializer round-trip.
-    let template = format!("{key} {value}{MANAGED_TRAILING_COMMENT}\n");
-    let parsed: KdlDocument = template
-        .parse()
+    // New node: parse a template so spacing and terminator are handled by
+    // KDL's own parser/serializer round-trip. v1 syntax for consistency
+    // with niri's expectations (see `update_struts_in_kdl`).
+    let template = format!("{key} {value}\n");
+    let parsed = KdlDocument::parse_v1(&template)
         .expect("our own managed-strut template must always be valid KDL");
     let mut new_node = parsed
         .nodes()
@@ -282,13 +281,8 @@ mod tests {
         let output =
             update_struts_in_kdl(input, &[(Side::Left, 100), (Side::Right, 200)]).unwrap();
 
-        // Then: a layout > struts block is created with both values, and our
-        // marker comment is present so it's clear who wrote them.
+        // Then: a layout > struts block is created with both values.
         assert_left_right(&output, 100, 200);
-        assert!(
-            output.contains("niri-sidepanels: managed"),
-            "marker comment must be on the managed lines"
-        );
     }
 
     #[test]

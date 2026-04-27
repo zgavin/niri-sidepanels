@@ -162,7 +162,7 @@ Behavior with `strut = N`:
 - Panel empty → `layout.struts.<side> = N`. Just the user's base padding; the tape uses the rest of the screen.
 - Panel non-empty → `layout.struts.<side> = N + panel.width`. Tape contracts to leave the panel column visible.
 
-Omit `strut` to leave that side's strut untouched in your niri config — niri-sidepanels won't read or write it. The first time managed struts kick in, your existing niri config is backed up to `~/.config/niri/config.kdl.niri-sidepanels.bak`. Managed lines are tagged with a `// niri-sidepanels: managed` trailing comment so it's obvious which values are tool-controlled.
+Omit `strut` to leave that side's strut untouched in your niri config — niri-sidepanels won't read or write it. The first time managed struts kick in, your existing niri config is backed up to `~/.config/niri/config.kdl.niri-sidepanels.bak` so you can always recover the original.
 
 ### Window rules
 

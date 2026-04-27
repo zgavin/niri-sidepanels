@@ -14,7 +14,7 @@ toml = "0.9.11"
 niri-ipc = "25.11.0"
 regex = "1.12.3"
 serde_regex = "1.1.0"
-kdl = { version = "6.5.0", default-features = false }
+kdl = { version = "6.5.0", default-features = false, features = ["v1"] }
 
 [dev-dependencies]
 tempfile = "3.25.0"
