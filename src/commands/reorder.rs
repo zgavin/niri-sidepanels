@@ -232,11 +232,17 @@ fn compute_layout_for_side(
             side, panel, panel_state, dims, screen, stack_y, active_peek,
         );
 
+        // Translate to output coords (what niri reports back via
+        // `tile_pos_in_workspace_view`) by adding the bar offsets. niri's
+        // `move_window` adds `working_area_loc` to whatever we send, so for a
+        // round-trip-equal `ExpectedLayout`/reported comparison we need to
+        // store the post-translation values here. `apply_layouts` reverses
+        // the translation before sending.
         out.push((
             window.id,
             ExpectedLayout {
-                x: target_x,
-                y: target_y,
+                x: target_x + config.bars.left,
+                y: target_y + config.bars.top,
                 width,
                 height: per_height,
             },
@@ -244,7 +250,11 @@ fn compute_layout_for_side(
     }
 }
 
-fn apply_layouts<C: NiriClient>(socket: &mut C, layouts: &[(u64, ExpectedLayout)]) {
+fn apply_layouts<C: NiriClient>(
+    socket: &mut C,
+    layouts: &[(u64, ExpectedLayout)],
+    bars: &crate::config::Bars,
+) {
     for (id, layout) in layouts {
         // niri ignores redundant size requests so this is cheap on unchanged
         // layouts.
@@ -256,10 +266,15 @@ fn apply_layouts<C: NiriClient>(socket: &mut C, layouts: &[(u64, ExpectedLayout)
             change: SizeChange::SetFixed(layout.height),
             id: Some(*id),
         });
+        // ExpectedLayout is in output coords (so it can be compared apples-to-
+        // apples with niri's `tile_pos_in_workspace_view` reports). niri's
+        // `MoveFloatingWindow` takes working-area coords and adds
+        // `working_area_loc` itself, so we subtract our bars offsets here to
+        // round-trip cleanly.
         let _ = socket.send_action(Action::MoveFloatingWindow {
             id: Some(*id),
-            x: PositionChange::SetFixed(layout.x.into()),
-            y: PositionChange::SetFixed(layout.y.into()),
+            x: PositionChange::SetFixed((layout.x - bars.left).into()),
+            y: PositionChange::SetFixed((layout.y - bars.top).into()),
         });
     }
 }
@@ -281,7 +296,7 @@ fn reorder_side<C: NiriClient>(
         screen,
         &mut layouts,
     );
-    apply_layouts(&mut ctx.socket, &layouts);
+    apply_layouts(&mut ctx.socket, &layouts, &ctx.config.bars);
 
     // Mark each affected window as "still settling" so the WLC handler can
     // distinguish niri's animation frames from real user moves. *Only* mark
@@ -943,12 +958,14 @@ mod tests {
         // Then: the working area is 1080 - 30 - 0 = 1050. Available vertical
         // is 1050 - 50 - 50 = 950, so the single window gets height 950.
         // Bottom-up stack_y in working-area coords: 1050 - 50 - 950 = 50.
-        // niri will translate that to output y = 30 + 50 = 80 by adding
-        // working_area_loc.y itself, so we don't include the bar offset.
+        // ExpectedLayout is in OUTPUT coords (matches what niri reports via
+        // `tile_pos_in_workspace_view`), so we add bars.top: 50 + 30 = 80.
+        // `apply_layouts` will subtract bars.top before sending to niri so
+        // the action and the report round-trip cleanly.
         assert_eq!(layouts.len(), 1);
         let (_, layout) = layouts[0];
         assert_eq!(layout.height, 950);
-        assert_eq!(layout.y, 50);
+        assert_eq!(layout.y, 80);
     }
 
     #[test]
@@ -1005,6 +1022,62 @@ mod tests {
         assert!(
             cooldown >= expected_cooldown_lower && cooldown <= expected_cooldown_upper,
             "cooldown {cooldown} should land in [{expected_cooldown_lower}, {expected_cooldown_upper}]"
+        );
+    }
+
+    #[test]
+    fn test_reorder_with_bars_round_trips_position_consistently() {
+        // Given: a 30px top bar, a window already at the resting position
+        // niri would assign after our fix. Critically, the niri-reported
+        // position (output coords) is `working_area_loc.y` higher than the
+        // value we send via `MoveFloatingWindow`.
+        let temp_dir = tempdir().unwrap();
+        let mut w1 = mock_window(1, false, true, 1, None);
+        // Output-coord position niri would report after our fix:
+        //   working_h = 1080 - 30 = 1050
+        //   stack_y_workarea = 1050 - 50 - 950 = 50
+        //   output y = 50 + 30 = 80
+        w1.layout.tile_pos_in_workspace_view = Some((1600.0, 80.0));
+        w1.layout.window_size = (300, 950);
+        let mock = MockNiri::new(vec![w1]);
+        let mut config = mock_config();
+        config.bars.top = 30;
+        let state = AppState {
+            right: panel_state_with(vec![win_state(1)]),
+            ..Default::default()
+        };
+        let mut ctx = Ctx {
+            state,
+            config,
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+
+        // When: we run a full reorder.
+        reorder(&mut ctx).expect("reorder failed");
+
+        // Then: niri's report (output y=80) matches our ExpectedLayout (y=80
+        // since compute now produces output coords), so check_layout returns
+        // Match and no cooldown is set. This is the case that *was* getting
+        // a false Drift verdict and false cooldown set, blocking subsequent
+        // drag-to-eject.
+        assert_eq!(
+            ctx.state.right.windows[0].cooldown_until,
+            None,
+            "no-op reorder with bars must not set cooldown"
+        );
+        // Apply must subtract bars before sending so niri ends up storing
+        // the same output y after adding working_area_loc back.
+        let actions = &ctx.socket.sent_actions;
+        assert!(
+            actions.iter().any(|a| matches!(a,
+                Action::MoveFloatingWindow {
+                    id: Some(1),
+                    y: PositionChange::SetFixed(y),
+                    ..
+                } if (*y - 50.0).abs() < 0.5
+            )),
+            "apply_layouts must send working-area y (50), not output y (80)"
         );
     }
 

@@ -86,15 +86,18 @@ fn default_cooldown_ms() -> i64 {
     500
 }
 
-/// Vertical space that niri's working area excludes from the output —
-/// typically layer-shell bars (waybar etc.) and any user-configured struts.
-/// Subtracted from the screen height before any panel layout math, so the
-/// daemon's idea of "available vertical space" matches what niri actually
-/// gives us when we send `MoveFloatingWindow`.
+/// Space that niri's working area excludes from the output — typically
+/// layer-shell bars (waybar etc.) and any user-configured struts. niri's
+/// `move_window` adds `working_area_loc` to whatever we send it and reports
+/// `tile_pos_in_workspace_view` in output coords, so we use these values for
+/// two things:
 ///
-/// niri's `move_window` translates our position by `working_area_loc.y`
-/// automatically, so we don't need to *offset* — we just need to shrink
-/// our usable height.
+/// 1. **Shrink usable area** — subtracted from output dimensions before
+///    laying out panel windows, so our layout math has accurate bounds.
+/// 2. **Translate between coordinate systems** — `apply_layouts` subtracts
+///    these from the position before sending to `MoveFloatingWindow`, so
+///    that after niri adds `working_area_loc` back the resulting reported
+///    layout matches our `ExpectedLayout` exactly.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Bars {
     /// Pixels excluded at the top edge — e.g. the height of a top waybar.
@@ -103,6 +106,13 @@ pub struct Bars {
     /// Pixels excluded at the bottom edge.
     #[serde(default)]
     pub bottom: i32,
+    /// Pixels excluded at the left edge — vertical bars are uncommon but
+    /// supported for symmetry. Defaults to 0.
+    #[serde(default)]
+    pub left: i32,
+    /// Pixels excluded at the right edge. Defaults to 0.
+    #[serde(default)]
+    pub right: i32,
 }
 
 impl Config {
