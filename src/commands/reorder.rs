@@ -386,24 +386,12 @@ fn reorder_side<C: NiriClient>(
             };
             // If niri's current layout already matches what we'd compute,
             // no animation will run — skip the cooldown for this window.
-            let verdict = check_layout(expected, &window.layout);
-            eprintln!(
-                "[reorder] side={side:?} id={id}: expected={expected:?} \
-                 reported_pos={:?} reported_size={:?} verdict={verdict:?}",
-                window.layout.tile_pos_in_workspace_view, window.layout.window_size
-            );
-            if matches!(verdict, LayoutCheck::Match) {
-                eprintln!("[reorder] side={side:?} id={id}: layout unchanged, no cooldown");
+            if matches!(check_layout(expected, &window.layout), LayoutCheck::Match) {
                 continue;
             }
             if let Some(w) = panel_state.windows.iter_mut().find(|w| w.id == *id) {
                 w.cooldown_until = Some(cooldown_end);
                 w.last_applied = Some(*expected);
-                eprintln!(
-                    "[reorder] side={side:?} id={id}: cooldown set until {cooldown_end} \
-                     ({}ms from now), last_applied={expected:?}",
-                    ctx.config.animation.cooldown_ms
-                );
             }
         }
     }

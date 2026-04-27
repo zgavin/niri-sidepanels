@@ -94,7 +94,6 @@ pub fn process_close<C: NiriClient>(ctx: &mut Ctx<C>, closed_id: u64) -> Result<
 }
 
 pub fn process_focus<C: NiriClient>(ctx: &mut Ctx<C>) -> Result<()> {
-    eprintln!("[focus] WindowFocusChanged → reorder");
     reorder(ctx)?;
     Ok(())
 }
@@ -153,18 +152,12 @@ pub fn process_window_layouts_changed<C: NiriClient>(
     ctx: &mut Ctx<C>,
     changes: &[(u64, WindowLayout)],
 ) -> Result<()> {
-    eprintln!(
-        "[wlc] received: ids={:?}",
-        changes.iter().map(|(id, _)| *id).collect::<Vec<_>>()
-    );
-
     // Quick path: if no changed window is currently panel-tracked, we have
     // nothing to compare against and can skip the niri queries entirely.
     let any_tracked = changes
         .iter()
         .any(|(id, _)| ctx.state.side_of(*id).is_some());
     if !any_tracked {
-        eprintln!("[wlc] short-circuit: none of the changed ids are panel-tracked");
         return Ok(());
     }
 
@@ -172,7 +165,6 @@ pub fn process_window_layouts_changed<C: NiriClient>(
     let mut to_eject: Vec<(Side, u64)> = Vec::new();
     for (id, reported) in changes {
         let Some(side) = ctx.state.side_of(*id) else {
-            eprintln!("[wlc] id={id}: not panel-tracked, skipping");
             continue;
         };
 
@@ -185,23 +177,12 @@ pub fn process_window_layouts_changed<C: NiriClient>(
         let last_applied = w_state.and_then(|w| w.last_applied);
         let is_settling = cooldown_until.is_some_and(|deadline| deadline > now);
         let Some(baseline) = last_applied else {
-            eprintln!("[wlc] id={id} side={side:?}: not yet positioned, skipping drift check");
             continue;
         };
         if is_settling {
-            eprintln!(
-                "[wlc] id={id} side={side:?}: cooling down ({}ms remaining), skipping drift check",
-                cooldown_until.unwrap() - now
-            );
             continue;
         }
-        let verdict = check_layout(&baseline, reported);
-        eprintln!(
-            "[wlc] id={id} side={side:?}: last_applied={baseline:?} reported_pos={:?} \
-             reported_size={:?} cooldown_until={cooldown_until:?} now={now} verdict={verdict:?}",
-            reported.tile_pos_in_workspace_view, reported.window_size
-        );
-        if matches!(verdict, LayoutCheck::Drift) {
+        if matches!(check_layout(&baseline, reported), LayoutCheck::Drift) {
             println!(
                 "Panel {:?} window {} drifted from expected layout. Ejecting.",
                 side, id
@@ -209,7 +190,6 @@ pub fn process_window_layouts_changed<C: NiriClient>(
             to_eject.push((side, *id));
         }
     }
-    eprintln!("[wlc] to_eject={to_eject:?}");
 
     if to_eject.is_empty() {
         return Ok(());
