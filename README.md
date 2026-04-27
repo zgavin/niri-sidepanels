@@ -125,6 +125,18 @@ left = 10
 bottom = 10
 ```
 
+### Accounting for bars
+
+If you have a layer-shell bar (waybar, etc.) at the top or bottom of the screen, niri's working area is smaller than the raw output. niri-sidepanels can't detect these zones automatically, so set them in `[bars]` to match — otherwise the daemon's height math thinks it has more vertical space than niri actually gives it, and panel windows extend past the visible bottom of the workspace.
+
+```toml
+[bars]
+top = 30      # height of your top bar in pixels
+bottom = 0    # height of your bottom bar; 0 if none
+```
+
+Both default to 0, so users without bars (or who haven't run into the issue) can leave the section out entirely.
+
 ### Window rules
 
 Window rules let you customize behavior for specific windows by `app_id` or `title`. Rules are evaluated in order; the first match applies. Omitted fields fall back to the panel's defaults.

@@ -186,11 +186,16 @@ fn compute_layout_for_side(
     }
 
     let (_, screen_h) = screen;
+    // niri's `MoveFloatingWindow` operates in working-area coordinates: it
+    // adds `working_area_loc.y` to whatever y we send. So we shrink the
+    // effective height by the user's configured bar zones rather than offset
+    // — niri does the offset for us.
+    let working_h = (screen_h - config.bars.top - config.bars.bottom).max(0);
     let gap = panel.gap;
-    let per_height = equal_height(screen_h, panel.margins.top, panel.margins.bottom, gap, n);
+    let per_height = equal_height(working_h, panel.margins.top, panel.margins.bottom, gap, n);
 
     // Layout bottom-up: first window at the bottom, subsequent windows stacked
-    // above with `gap` between them.
+    // above with `gap` between them. Coordinates are in working-area space.
     for (i, window) in windows.iter().enumerate() {
         let width = resolve_width(window, panel, &config.window_rule);
         let dims = WindowTarget { width, height: per_height };
@@ -201,7 +206,7 @@ fn compute_layout_for_side(
             resolve_rule_peek(&config.window_rule, window, panel.peek)
         };
 
-        let stack_y = screen_h
+        let stack_y = working_h
             - panel.margins.bottom
             - per_height
             - (i as i32) * (per_height + gap);
@@ -863,5 +868,52 @@ mod tests {
         // Then: the disabled panel contributes no layouts, so the result is
         // empty even though the window is tracked.
         assert!(layouts.is_empty());
+    }
+
+    #[test]
+    fn test_compute_layouts_subtracts_top_and_bottom_bars() {
+        // Given: a 30px top waybar (no bottom bar), one tracked window on the
+        // right with the standard mock_config margins (top=50, bottom=50).
+        let w1 = mock_window(1, false, true, 1, None);
+        let mut config = mock_config();
+        config.bars.top = 30;
+        config.bars.bottom = 0;
+        let state = AppState {
+            right: panel_state_with(vec![win_state(1)]),
+            ..Default::default()
+        };
+
+        // When: we compute layouts on a 1920x1080 output.
+        let layouts = compute_layouts(&config, &state, &[w1], 1, (1920, 1080));
+
+        // Then: the working area is 1080 - 30 - 0 = 1050. Available vertical
+        // is 1050 - 50 - 50 = 950, so the single window gets height 950.
+        // Bottom-up stack_y in working-area coords: 1050 - 50 - 950 = 50.
+        // niri will translate that to output y = 30 + 50 = 80 by adding
+        // working_area_loc.y itself, so we don't include the bar offset.
+        assert_eq!(layouts.len(), 1);
+        let (_, layout) = layouts[0];
+        assert_eq!(layout.height, 950);
+        assert_eq!(layout.y, 50);
+    }
+
+    #[test]
+    fn test_compute_layouts_with_zero_bars_matches_pre_bars_behavior() {
+        // Given: bars defaulted to (0, 0) — what every prior test assumed.
+        let w1 = mock_window(1, false, true, 1, None);
+        let state = AppState {
+            right: panel_state_with(vec![win_state(1)]),
+            ..Default::default()
+        };
+
+        // When: we compute layouts.
+        let layouts = compute_layouts(&mock_config(), &state, &[w1], 1, (1920, 1080));
+
+        // Then: the math is identical to before bars existed — height 980
+        // and y 50, matching `test_equal_height_one_window_fills_available`.
+        // The new field is fully backwards-compatible when left at 0.
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0].1.height, 980);
+        assert_eq!(layouts[0].1.y, 50);
     }
 }

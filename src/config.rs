@@ -35,6 +35,8 @@ pub struct Config {
     #[serde(default = "default_right_panel")]
     pub right: Panel,
     #[serde(default)]
+    pub bars: Bars,
+    #[serde(default)]
     pub window_rule: Vec<WindowRule>,
 }
 
@@ -43,9 +45,29 @@ impl Default for Config {
         Self {
             left: Panel::default(),
             right: default_right_panel(),
+            bars: Bars::default(),
             window_rule: vec![],
         }
     }
+}
+
+/// Vertical space that niri's working area excludes from the output —
+/// typically layer-shell bars (waybar etc.) and any user-configured struts.
+/// Subtracted from the screen height before any panel layout math, so the
+/// daemon's idea of "available vertical space" matches what niri actually
+/// gives us when we send `MoveFloatingWindow`.
+///
+/// niri's `move_window` translates our position by `working_area_loc.y`
+/// automatically, so we don't need to *offset* — we just need to shrink
+/// our usable height.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Bars {
+    /// Pixels excluded at the top edge — e.g. the height of a top waybar.
+    #[serde(default)]
+    pub top: i32,
+    /// Pixels excluded at the bottom edge.
+    #[serde(default)]
+    pub bottom: i32,
 }
 
 impl Config {
