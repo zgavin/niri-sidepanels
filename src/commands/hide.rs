@@ -36,6 +36,8 @@ mod tests {
                     height: 500,
                     is_floating: true,
                     position: None,
+                    cooldown_until: None,
+                    last_applied: None,
                 }],
                 is_hidden: false,
                 is_flipped: false,

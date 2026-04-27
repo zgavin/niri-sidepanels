@@ -2,10 +2,23 @@ use crate::config::{Config, Panel, Side, WindowRule};
 use crate::niri::NiriClient;
 use crate::state::{AppState, PanelState, save_state};
 use crate::window_rules::{resolve_rule_focus_peek, resolve_rule_peek, resolve_window_size};
-use crate::{Ctx, WindowTarget};
+use crate::{Ctx, ExpectedLayout, WindowTarget};
 use anyhow::Result;
 use niri_ipc::{Action, PositionChange, SizeChange, Window, WindowLayout};
 use std::collections::HashSet;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Wall-clock millis since the Unix epoch. Used to set / compare per-window
+/// cooldown deadlines for the eject-on-drag logic. Falls back to 0 if the
+/// system clock is somehow before 1970, which would only happen if the host
+/// clock is wildly broken — in which case cooldowns will never trigger,
+/// which degrades gracefully back to PR #6's behavior.
+pub(crate) fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 /// Never shrink a panel window below this height even if many windows are
 /// stacked. Prevents division producing unusable or negative heights.
@@ -15,18 +28,6 @@ const MIN_WINDOW_HEIGHT: i32 = 80;
 /// resize rather than our own echo. Sub-pixel noise stays below this; any
 /// real drag (~several pixels minimum) clears it.
 pub(crate) const LAYOUT_TOLERANCE_PX: f64 = 1.0;
-
-/// What the daemon thinks a panel window should look like right now. Computed
-/// from config + state + niri's current window list. Used both as the source
-/// of truth that `reorder` applies, and as the "expected" side of the
-/// comparison when a `WindowLayoutsChanged` event arrives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ExpectedLayout {
-    pub x: i32,
-    pub y: i32,
-    pub width: i32,
-    pub height: i32,
-}
 
 /// Result of comparing a niri-reported layout against the daemon's expected
 /// layout for a panel window.
@@ -44,17 +45,30 @@ pub(crate) enum LayoutCheck {
 }
 
 /// Compare a niri-reported `WindowLayout` against a daemon-computed
-/// `ExpectedLayout`.
+/// `ExpectedLayout`. Drift is **position-only** — size differences are
+/// intentionally ignored, for two reasons:
+///
+/// 1. Apps with a hard minimum size (VS Code, etc.) refuse niri's
+///    `SetWindowWidth` requests when our panel width is below their
+///    minimum. niri reports the app's actual size, which differs from
+///    our expected. Treating that as drift would eject the window on
+///    every reorder pass — the panel would be unusable for any
+///    min-size app.
+/// 2. niri's interactive resize emits WLC per-frame (unlike interactive
+///    move). Treating size drift as drift would eject the window on the
+///    first frame, interrupting the user mid-action.
+///
+/// Position-drift catches the user-drag case, which is the primary
+/// "I want this out of the panel" affordance. Resize-as-eject is left
+/// out deliberately — see `v3_dynamic_panels.md` for the long-term
+/// vision where resize reshapes the panel rather than ejecting from it.
 pub(crate) fn check_layout(expected: &ExpectedLayout, reported: &WindowLayout) -> LayoutCheck {
     let Some((rx, ry)) = reported.tile_pos_in_workspace_view else {
         return LayoutCheck::Insufficient;
     };
     let pos_drift = (rx - expected.x as f64).abs() >= LAYOUT_TOLERANCE_PX
         || (ry - expected.y as f64).abs() >= LAYOUT_TOLERANCE_PX;
-    let (rw, rh) = reported.window_size;
-    let size_drift = ((rw - expected.width).abs() as f64) >= LAYOUT_TOLERANCE_PX
-        || ((rh - expected.height).abs() as f64) >= LAYOUT_TOLERANCE_PX;
-    if pos_drift || size_drift {
+    if pos_drift {
         LayoutCheck::Drift
     } else {
         LayoutCheck::Match
@@ -124,6 +138,76 @@ pub fn reorder<C: NiriClient>(ctx: &mut Ctx<C>) -> Result<()> {
             dirty = true;
         }
     }
+
+    // Drift-eject pass: any panel-tracked window whose niri-reported layout
+    // diverges from what we'd compute is treated as a user-moved window and
+    // ejected from panel tracking — *unless* it's still in its post-reorder
+    // cooldown, in which case the divergence is our own animation in flight.
+    //
+    // niri does not emit `WindowLayoutsChanged` for interactive (mouse)
+    // floating drags (its IPC layout uses settled `logical_pos`, skipping
+    // the animated render offset to avoid IPC spam). So the WLC handler
+    // alone misses drag-driven drifts and we have to do this check on every
+    // reorder pass to catch them.
+    let now = now_ms();
+    for side in Side::ALL {
+        let mut to_eject: Vec<u64> = Vec::new();
+        let mut layouts = Vec::new();
+        compute_layout_for_side(
+            &ctx.config,
+            &ctx.state,
+            side,
+            &all_windows,
+            current_ws,
+            (display_w, display_h),
+            &mut layouts,
+        );
+        for (id, _expected) in &layouts {
+            let Some(window) = all_windows.iter().find(|w| w.id == *id) else {
+                continue;
+            };
+            let w_state = ctx
+                .state
+                .panel(side)
+                .windows
+                .iter()
+                .find(|w| w.id == *id);
+            let cooldown = w_state.and_then(|w| w.cooldown_until);
+            let last_applied = w_state.and_then(|w| w.last_applied);
+            // Skip drift-eject when we have no `last_applied` baseline to
+            // compare against (window not yet positioned by us) or when the
+            // window is still settling from a recent reorder pass.
+            //
+            // Comparing against `last_applied` rather than the freshly
+            // computed expected matters for the case where a sibling was
+            // just ejected: the survivors' freshly-recomputed expected
+            // changes (panel re-divides), but their actual reported layout
+            // still matches what we last applied — which means *no user
+            // drift has happened*, just the layout-recomputation lag.
+            let Some(baseline) = last_applied else {
+                continue;
+            };
+            let is_settling = cooldown.is_some_and(|d| d > now);
+            if is_settling {
+                continue;
+            }
+            if matches!(check_layout(&baseline, &window.layout), LayoutCheck::Drift) {
+                println!(
+                    "Panel {:?} window {} drifted from expected layout. Ejecting.",
+                    side, id
+                );
+                to_eject.push(*id);
+            }
+        }
+        if !to_eject.is_empty() {
+            let panel_state = ctx.state.panel_mut(side);
+            panel_state.windows.retain(|w| !to_eject.contains(&w.id));
+            for id in to_eject {
+                ctx.state.ignored_windows.push(id);
+            }
+            dirty = true;
+        }
+    }
     if dirty {
         save_state(&ctx.state, &ctx.cache_dir)?;
     }
@@ -132,13 +216,19 @@ pub fn reorder<C: NiriClient>(ctx: &mut Ctx<C>) -> Result<()> {
         reorder_side(ctx, side, &all_windows, current_ws, (display_w, display_h))?;
     }
 
+    // reorder_side may have set per-window cooldown timestamps; persist them
+    // so the WLC handler in the daemon process sees the same values that the
+    // user-CLI invocation just wrote.
+    save_state(&ctx.state, &ctx.cache_dir)?;
     Ok(())
 }
 
 /// Compute the expected layout for every panel-tracked window currently on
-/// the active workspace. Pure function — same inputs, same outputs, no I/O.
-/// Used both by `reorder` (to drive niri actions) and by the
-/// `WindowLayoutsChanged` listener (to compare against reported layouts).
+/// the active workspace, across both sides. Pure function — same inputs,
+/// same outputs, no I/O. Production code uses `compute_layout_for_side`
+/// directly (one side per call); this thin wrapper exists only for tests
+/// that want the convenience of "give me everything."
+#[cfg(test)]
 pub(crate) fn compute_layouts(
     config: &Config,
     state: &AppState,
@@ -215,11 +305,17 @@ fn compute_layout_for_side(
             side, panel, panel_state, dims, screen, stack_y, active_peek,
         );
 
+        // Translate to output coords (what niri reports back via
+        // `tile_pos_in_workspace_view`) by adding the bar offsets. niri's
+        // `move_window` adds `working_area_loc` to whatever we send, so for a
+        // round-trip-equal `ExpectedLayout`/reported comparison we need to
+        // store the post-translation values here. `apply_layouts` reverses
+        // the translation before sending.
         out.push((
             window.id,
             ExpectedLayout {
-                x: target_x,
-                y: target_y,
+                x: target_x + config.bars.left,
+                y: target_y + config.bars.top,
                 width,
                 height: per_height,
             },
@@ -227,7 +323,11 @@ fn compute_layout_for_side(
     }
 }
 
-fn apply_layouts<C: NiriClient>(socket: &mut C, layouts: &[(u64, ExpectedLayout)]) {
+fn apply_layouts<C: NiriClient>(
+    socket: &mut C,
+    layouts: &[(u64, ExpectedLayout)],
+    bars: &crate::config::Bars,
+) {
     for (id, layout) in layouts {
         // niri ignores redundant size requests so this is cheap on unchanged
         // layouts.
@@ -239,10 +339,15 @@ fn apply_layouts<C: NiriClient>(socket: &mut C, layouts: &[(u64, ExpectedLayout)
             change: SizeChange::SetFixed(layout.height),
             id: Some(*id),
         });
+        // ExpectedLayout is in output coords (so it can be compared apples-to-
+        // apples with niri's `tile_pos_in_workspace_view` reports). niri's
+        // `MoveFloatingWindow` takes working-area coords and adds
+        // `working_area_loc` itself, so we subtract our bars offsets here to
+        // round-trip cleanly.
         let _ = socket.send_action(Action::MoveFloatingWindow {
             id: Some(*id),
-            x: PositionChange::SetFixed(layout.x.into()),
-            y: PositionChange::SetFixed(layout.y.into()),
+            x: PositionChange::SetFixed((layout.x - bars.left).into()),
+            y: PositionChange::SetFixed((layout.y - bars.top).into()),
         });
     }
 }
@@ -264,7 +369,32 @@ fn reorder_side<C: NiriClient>(
         screen,
         &mut layouts,
     );
-    apply_layouts(&mut ctx.socket, &layouts);
+    apply_layouts(&mut ctx.socket, &layouts, &ctx.config.bars);
+
+    // Mark each affected window as "still settling" so the WLC handler can
+    // distinguish niri's animation frames from real user moves. *Only* mark
+    // windows whose layout actually changed — niri ignores no-op move/size
+    // actions and won't emit WLC events for them, so a blanket cooldown
+    // would wrongly suppress user drags after every focus change (which
+    // fires reorder but rarely changes any actual position).
+    if !layouts.is_empty() {
+        let cooldown_end = now_ms() + ctx.config.animation.cooldown_ms;
+        let panel_state = ctx.state.panel_mut(side);
+        for (id, expected) in &layouts {
+            let Some(window) = all_windows.iter().find(|w| w.id == *id) else {
+                continue;
+            };
+            // If niri's current layout already matches what we'd compute,
+            // no animation will run — skip the cooldown for this window.
+            if matches!(check_layout(expected, &window.layout), LayoutCheck::Match) {
+                continue;
+            }
+            if let Some(w) = panel_state.windows.iter_mut().find(|w| w.id == *id) {
+                w.cooldown_until = Some(cooldown_end);
+                w.last_applied = Some(*expected);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -293,6 +423,8 @@ mod tests {
             height: 200,
             is_floating: false,
             position: None,
+            cooldown_until: None,
+            last_applied: None,
         }
     }
 
@@ -763,16 +895,19 @@ mod tests {
     }
 
     #[test]
-    fn test_check_layout_size_drift() {
-        // Given: position matches but width has changed by 50 — user resized.
+    fn test_check_layout_size_difference_is_not_drift() {
+        // Given: position matches exactly but width has changed by 50.
         let expected = ExpectedLayout { x: 100, y: 200, width: 300, height: 400 };
         let reported = reported_at(Some((100.0, 200.0)), (350, 400));
 
         // When: we compare.
         let check = check_layout(&expected, &reported);
 
-        // Then: result is Drift — resize counts the same as a move.
-        assert_eq!(check, LayoutCheck::Drift);
+        // Then: Match. Size differences are deliberately ignored — apps
+        // with min-size constraints (VS Code etc.) routinely refuse our
+        // SetWindowWidth, and we don't want to eject them every reorder.
+        // See the doc on `check_layout` for the full reasoning.
+        assert_eq!(check, LayoutCheck::Match);
     }
 
     #[test]
@@ -889,12 +1024,14 @@ mod tests {
         // Then: the working area is 1080 - 30 - 0 = 1050. Available vertical
         // is 1050 - 50 - 50 = 950, so the single window gets height 950.
         // Bottom-up stack_y in working-area coords: 1050 - 50 - 950 = 50.
-        // niri will translate that to output y = 30 + 50 = 80 by adding
-        // working_area_loc.y itself, so we don't include the bar offset.
+        // ExpectedLayout is in OUTPUT coords (matches what niri reports via
+        // `tile_pos_in_workspace_view`), so we add bars.top: 50 + 30 = 80.
+        // `apply_layouts` will subtract bars.top before sending to niri so
+        // the action and the report round-trip cleanly.
         assert_eq!(layouts.len(), 1);
         let (_, layout) = layouts[0];
         assert_eq!(layout.height, 950);
-        assert_eq!(layout.y, 50);
+        assert_eq!(layout.y, 80);
     }
 
     #[test]
@@ -915,5 +1052,135 @@ mod tests {
         assert_eq!(layouts.len(), 1);
         assert_eq!(layouts[0].1.height, 980);
         assert_eq!(layouts[0].1.y, 50);
+    }
+
+    #[test]
+    fn test_reorder_sets_cooldown_on_window_whose_layout_will_change() {
+        // Given: a tracked panel window whose niri-reported tile_pos is None
+        // (so check_layout returns Insufficient — not a Match). The conservative
+        // path treats this as "may animate" and sets cooldown.
+        let temp_dir = tempdir().unwrap();
+        let w1 = mock_window(1, false, true, 1, None);
+        let mock = MockNiri::new(vec![w1]);
+        let state = AppState {
+            right: panel_state_with(vec![win_state(1)]),
+            ..Default::default()
+        };
+        let mut ctx = Ctx {
+            state,
+            config: mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+        let before_call = now_ms();
+
+        // When: we run a full reorder.
+        reorder(&mut ctx).expect("reorder failed");
+
+        // Then: the window's cooldown_until is set to a time roughly
+        // `cooldown_ms` (default 500) in the future. Slack covers clock
+        // granularity and test execution time.
+        let cooldown = ctx.state.right.windows[0]
+            .cooldown_until
+            .expect("cooldown must be set after a reorder");
+        let expected_cooldown_lower = before_call + ctx.config.animation.cooldown_ms - 50;
+        let expected_cooldown_upper = now_ms() + ctx.config.animation.cooldown_ms;
+        assert!(
+            cooldown >= expected_cooldown_lower && cooldown <= expected_cooldown_upper,
+            "cooldown {cooldown} should land in [{expected_cooldown_lower}, {expected_cooldown_upper}]"
+        );
+    }
+
+    #[test]
+    fn test_reorder_with_bars_round_trips_position_consistently() {
+        // Given: a 30px top bar, a window already at the resting position
+        // niri would assign after our fix. Critically, the niri-reported
+        // position (output coords) is `working_area_loc.y` higher than the
+        // value we send via `MoveFloatingWindow`.
+        let temp_dir = tempdir().unwrap();
+        let mut w1 = mock_window(1, false, true, 1, None);
+        // Output-coord position niri would report after our fix:
+        //   working_h = 1080 - 30 = 1050
+        //   stack_y_workarea = 1050 - 50 - 950 = 50
+        //   output y = 50 + 30 = 80
+        w1.layout.tile_pos_in_workspace_view = Some((1600.0, 80.0));
+        w1.layout.window_size = (300, 950);
+        let mock = MockNiri::new(vec![w1]);
+        let mut config = mock_config();
+        config.bars.top = 30;
+        let state = AppState {
+            right: panel_state_with(vec![win_state(1)]),
+            ..Default::default()
+        };
+        let mut ctx = Ctx {
+            state,
+            config,
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+
+        // When: we run a full reorder.
+        reorder(&mut ctx).expect("reorder failed");
+
+        // Then: niri's report (output y=80) matches our ExpectedLayout (y=80
+        // since compute now produces output coords), so check_layout returns
+        // Match and no cooldown is set. This is the case that *was* getting
+        // a false Drift verdict and false cooldown set, blocking subsequent
+        // drag-to-eject.
+        assert_eq!(
+            ctx.state.right.windows[0].cooldown_until,
+            None,
+            "no-op reorder with bars must not set cooldown"
+        );
+        // Apply must subtract bars before sending so niri ends up storing
+        // the same output y after adding working_area_loc back.
+        let actions = &ctx.socket.sent_actions;
+        assert!(
+            actions.iter().any(|a| matches!(a,
+                Action::MoveFloatingWindow {
+                    id: Some(1),
+                    y: PositionChange::SetFixed(y),
+                    ..
+                } if (*y - 50.0).abs() < 0.5
+            )),
+            "apply_layouts must send working-area y (50), not output y (80)"
+        );
+    }
+
+    #[test]
+    fn test_reorder_skips_cooldown_when_layout_is_already_correct() {
+        // Given: a window already at the position and size compute_layouts
+        // would assign — niri.layout matches expected within ε. This is the
+        // common case for focus-change-driven reorders, which fire on every
+        // click but rarely actually change a panel window's layout.
+        let temp_dir = tempdir().unwrap();
+        let mut w1 = mock_window(1, false, true, 1, None);
+        // mock_config: 1-window right panel layout is x=1600, y=50, w=300, h=980.
+        w1.layout.tile_pos_in_workspace_view = Some((1600.0, 50.0));
+        w1.layout.window_size = (300, 980);
+        let mock = MockNiri::new(vec![w1]);
+        let state = AppState {
+            right: panel_state_with(vec![win_state(1)]),
+            ..Default::default()
+        };
+        let mut ctx = Ctx {
+            state,
+            config: mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+
+        // When: we run a full reorder.
+        reorder(&mut ctx).expect("reorder failed");
+
+        // Then: cooldown stays None — niri won't emit any WLC events for a
+        // no-op layout, so we have no animation frames to suppress.
+        // Critically this means a user drag that follows a focus-change
+        // reorder isn't blocked by a stale cooldown.
+        assert_eq!(
+            ctx.state.right.windows[0].cooldown_until,
+            None,
+            "cooldown must not be set when layout is already at expected"
+        );
     }
 }

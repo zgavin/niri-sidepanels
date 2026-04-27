@@ -37,6 +37,8 @@ pub struct Config {
     #[serde(default)]
     pub bars: Bars,
     #[serde(default)]
+    pub animation: Animation,
+    #[serde(default)]
     pub window_rule: Vec<WindowRule>,
 }
 
@@ -46,20 +48,56 @@ impl Default for Config {
             left: Panel::default(),
             right: default_right_panel(),
             bars: Bars::default(),
+            animation: Animation::default(),
             window_rule: vec![],
         }
     }
 }
 
-/// Vertical space that niri's working area excludes from the output —
-/// typically layer-shell bars (waybar etc.) and any user-configured struts.
-/// Subtracted from the screen height before any panel layout math, so the
-/// daemon's idea of "available vertical space" matches what niri actually
-/// gives us when we send `MoveFloatingWindow`.
+/// Tunables for how the daemon handles niri's animations.
 ///
-/// niri's `move_window` translates our position by `working_area_loc.y`
-/// automatically, so we don't need to *offset* — we just need to shrink
-/// our usable height.
+/// Whenever we send a reorder pass (toggle, send, flip, hide, eject, etc.),
+/// niri animates each affected window from its current position to the new
+/// one. Niri emits `WindowLayoutsChanged` events for intermediate frames; if
+/// we ran the eject-on-drag check on those, we'd treat the animation itself
+/// as a user move and eject the window. So we mark each touched window as
+/// "still settling" for `cooldown_ms` after the reorder, and skip drift
+/// checks during that window.
+///
+/// The default of 500ms covers niri's stock animation config. If you've sped
+/// niri's animations up or slowed them down, tune this to match — too short
+/// causes spurious ejects, too long means the user has to drag-and-pause
+/// before we react.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub struct Animation {
+    #[serde(default = "default_cooldown_ms")]
+    pub cooldown_ms: i64,
+}
+
+impl Default for Animation {
+    fn default() -> Self {
+        Self {
+            cooldown_ms: default_cooldown_ms(),
+        }
+    }
+}
+
+fn default_cooldown_ms() -> i64 {
+    500
+}
+
+/// Space that niri's working area excludes from the output — typically
+/// layer-shell bars (waybar etc.) and any user-configured struts. niri's
+/// `move_window` adds `working_area_loc` to whatever we send it and reports
+/// `tile_pos_in_workspace_view` in output coords, so we use these values for
+/// two things:
+///
+/// 1. **Shrink usable area** — subtracted from output dimensions before
+///    laying out panel windows, so our layout math has accurate bounds.
+/// 2. **Translate between coordinate systems** — `apply_layouts` subtracts
+///    these from the position before sending to `MoveFloatingWindow`, so
+///    that after niri adds `working_area_loc` back the resulting reported
+///    layout matches our `ExpectedLayout` exactly.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Bars {
     /// Pixels excluded at the top edge — e.g. the height of a top waybar.
@@ -68,6 +106,13 @@ pub struct Bars {
     /// Pixels excluded at the bottom edge.
     #[serde(default)]
     pub bottom: i32,
+    /// Pixels excluded at the left edge — vertical bars are uncommon but
+    /// supported for symmetry. Defaults to 0.
+    #[serde(default)]
+    pub left: i32,
+    /// Pixels excluded at the right edge. Defaults to 0.
+    #[serde(default)]
+    pub right: i32,
 }
 
 impl Config {

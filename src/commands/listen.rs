@@ -1,6 +1,6 @@
 use crate::commands::movefrom::move_to;
 use crate::commands::reorder;
-use crate::commands::reorder::{LayoutCheck, check_layout, compute_layouts};
+use crate::commands::reorder::{LayoutCheck, check_layout, now_ms};
 use crate::commands::togglewindow::add_to_panel;
 use crate::config::{Side, load_config};
 use crate::niri::connect;
@@ -161,23 +161,28 @@ pub fn process_window_layouts_changed<C: NiriClient>(
         return Ok(());
     }
 
-    let screen = ctx.socket.get_screen_dimensions()?;
-    let current_ws = ctx.socket.get_active_workspace()?.id;
-    let all_windows = ctx.socket.get_windows()?;
-
-    let expected = compute_layouts(&ctx.config, &ctx.state, &all_windows, current_ws, screen);
-
+    let now = now_ms();
     let mut to_eject: Vec<(Side, u64)> = Vec::new();
     for (id, reported) in changes {
         let Some(side) = ctx.state.side_of(*id) else {
             continue;
         };
-        let Some((_, expected_layout)) = expected.iter().find(|(eid, _)| eid == id) else {
-            // Window is panel-tracked but not in the computed layout — likely
-            // on a different workspace right now. Skip.
+
+        // Compare niri's report against `last_applied` (the layout we last
+        // asked apply_layouts to set), not against a freshly computed
+        // expected — see reorder.rs for the rationale.
+        let panel_state = ctx.state.panel(side);
+        let w_state = panel_state.windows.iter().find(|w| w.id == *id);
+        let cooldown_until = w_state.and_then(|w| w.cooldown_until);
+        let last_applied = w_state.and_then(|w| w.last_applied);
+        let is_settling = cooldown_until.is_some_and(|deadline| deadline > now);
+        let Some(baseline) = last_applied else {
             continue;
         };
-        if matches!(check_layout(expected_layout, reported), LayoutCheck::Drift) {
+        if is_settling {
+            continue;
+        }
+        if matches!(check_layout(&baseline, reported), LayoutCheck::Drift) {
             println!(
                 "Panel {:?} window {} drifted from expected layout. Ejecting.",
                 side, id
@@ -227,6 +232,8 @@ mod tests {
                 height: 500,
                 is_floating: false,
                 position: None,
+                cooldown_until: None,
+                last_applied: None,
             },
             WindowState {
                 id: 200,
@@ -234,6 +241,8 @@ mod tests {
                 height: 500,
                 is_floating: true,
                 position: Some((1.0, 2.0)),
+                cooldown_until: None,
+                last_applied: None,
             },
         ]);
 
@@ -267,6 +276,8 @@ mod tests {
             height: 500,
             is_floating: false,
             position: None,
+            cooldown_until: None,
+            last_applied: None,
         });
         let mock = MockNiri::new(vec![]);
         let mut ctx = Ctx {
@@ -290,6 +301,8 @@ mod tests {
             height: 200,
             is_floating: true,
             position: Some((1.0, 2.0)),
+            cooldown_until: None,
+            last_applied: None,
         });
         state.right.windows.push(WindowState {
             id: 20,
@@ -297,6 +310,8 @@ mod tests {
             height: 200,
             is_floating: true,
             position: Some((1.0, 2.0)),
+            cooldown_until: None,
+            last_applied: None,
         });
 
         let w10 = mock_window(10, true, false, 1, Some((1.0, 2.0)));
@@ -470,6 +485,24 @@ mod tests {
             height: 800,
             is_floating: false,
             position: None,
+            cooldown_until: None,
+            last_applied: None,
+        }
+    }
+
+    /// Like `ws_state` but tagged as "previously positioned by apply_layouts":
+    /// cooldown is in the past and `last_applied` records where the panel
+    /// last placed the window. Drift-eject compares niri's report against
+    /// `last_applied`, so tests have to provide it explicitly.
+    fn ws_state_positioned(id: u64, last_applied: crate::ExpectedLayout) -> WindowState {
+        WindowState {
+            id,
+            width: 1000,
+            height: 800,
+            is_floating: false,
+            position: None,
+            cooldown_until: Some(now_ms() - 1_000),
+            last_applied: Some(last_applied),
         }
     }
 
@@ -524,13 +557,17 @@ mod tests {
 
     #[test]
     fn test_wlc_drift_position_ejects() {
-        // Given: a tracked panel window whose niri-reported position is far
-        // from the panel's expected slot — simulating a user drag.
+        // Given: a previously-positioned panel window whose niri-reported
+        // position is far from the panel's expected slot — simulating a
+        // user drag *after* the daemon's apply_layouts had set its slot.
         let temp_dir = tempdir().unwrap();
         let w1 = mock_window(1, false, true, 1, Some((400.0, 300.0)));
         let mock = MockNiri::new(vec![w1]);
         let mut state = AppState::default();
-        state.right.windows.push(ws_state(1));
+        state.right.windows.push(ws_state_positioned(
+            1,
+            crate::ExpectedLayout { x: 1600, y: 50, width: 300, height: 980 },
+        ));
         let mut ctx = Ctx {
             state,
             config: crate::test_utils::mock_config(),
@@ -549,14 +586,19 @@ mod tests {
     }
 
     #[test]
-    fn test_wlc_drift_size_ejects() {
-        // Given: a tracked window at its expected position but with a
-        // user-resized width (300 → 500).
+    fn test_wlc_size_only_change_does_not_eject() {
+        // Given: a previously-positioned tracked window at its expected
+        // position but with a different reported width (300 → 500). Either
+        // the user is mid-resize (niri's interactive resize emits per-frame
+        // WLC) or the app refuses our requested width (VS Code-style).
         let temp_dir = tempdir().unwrap();
         let w1 = mock_window(1, false, true, 1, Some((1600.0, 50.0)));
         let mock = MockNiri::new(vec![w1]);
         let mut state = AppState::default();
-        state.right.windows.push(ws_state(1));
+        state.right.windows.push(ws_state_positioned(
+            1,
+            crate::ExpectedLayout { x: 1600, y: 50, width: 300, height: 980 },
+        ));
         let mut ctx = Ctx {
             state,
             config: crate::test_utils::mock_config(),
@@ -568,9 +610,11 @@ mod tests {
         // When: the WLC handler runs.
         process_window_layouts_changed(&mut ctx, &changes).expect("WLC failed");
 
-        // Then: a resize triggers an eject just like a move does.
-        assert!(ctx.state.right.windows.is_empty());
-        assert!(ctx.state.ignored_windows.contains(&1));
+        // Then: no eject. Position-only drift means a size mismatch is
+        // tolerated, both during interactive resize (don't interrupt) and
+        // for apps with hard min-size constraints (don't constantly bounce).
+        assert_eq!(ctx.state.right.windows.len(), 1);
+        assert!(!ctx.state.ignored_windows.contains(&1));
     }
 
     #[test]
@@ -578,12 +622,23 @@ mod tests {
         // Given: two tracked windows in the right panel; the first at its
         // 2-window expected slot and the second visibly dragged off.
         let temp_dir = tempdir().unwrap();
-        let w1 = mock_window(1, false, true, 1, Some((1600.0, 545.0)));
+        // Mock w1 sized to match `last_applied` so the drift-eject pass
+        // inside the post-WLC `reorder` call sees Match (not size-drift)
+        // and leaves w1 alone. w2 is untouched — its position drifts
+        // anyway, which is what we want.
+        let mut w1 = mock_window(1, false, true, 1, Some((1600.0, 545.0)));
+        w1.layout.window_size = (300, 485);
         let w2 = mock_window(2, false, true, 1, Some((400.0, 300.0)));
         let mock = MockNiri::new(vec![w1, w2]);
         let mut state = AppState::default();
-        state.right.windows.push(ws_state(1));
-        state.right.windows.push(ws_state(2));
+        state.right.windows.push(ws_state_positioned(
+            1,
+            crate::ExpectedLayout { x: 1600, y: 545, width: 300, height: 485 },
+        ));
+        state.right.windows.push(ws_state_positioned(
+            2,
+            crate::ExpectedLayout { x: 1600, y: 50, width: 300, height: 485 },
+        ));
         let mut ctx = Ctx {
             state,
             config: crate::test_utils::mock_config(),
@@ -641,5 +696,79 @@ mod tests {
         // stays put and 999 is not pushed to ignored_windows.
         assert_eq!(ctx.state.right.windows.len(), 1);
         assert!(!ctx.state.ignored_windows.contains(&999));
+    }
+
+    #[test]
+    fn test_wlc_drift_during_cooldown_does_not_eject() {
+        // Given: a tracked panel window whose niri-reported position is far
+        // from the panel's expected slot — what would normally trigger an
+        // eject — but the window has a cooldown_until in the future,
+        // meaning we recently sent it a reorder and niri is still animating.
+        let temp_dir = tempdir().unwrap();
+        let w1 = mock_window(1, false, true, 1, Some((400.0, 300.0)));
+        let mock = MockNiri::new(vec![w1]);
+        let mut state = AppState::default();
+        state.right.windows.push(WindowState {
+            id: 1,
+            width: 1000,
+            height: 800,
+            is_floating: false,
+            position: None,
+            cooldown_until: Some(now_ms() + 60_000), // a minute in the future
+            last_applied: Some(crate::ExpectedLayout {
+                x: 1600, y: 50, width: 300, height: 980,
+            }),
+        });
+        let mut ctx = Ctx {
+            state,
+            config: crate::test_utils::mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+        let changes = vec![(1, reported_at(Some((400.0, 300.0)), (300, 980)))];
+
+        // When: the WLC handler runs.
+        process_window_layouts_changed(&mut ctx, &changes).expect("WLC failed");
+
+        // Then: no eject — the window stays tracked even though the reported
+        // position differs from expected. The cooldown protects niri's own
+        // animation frames from being treated as user drift.
+        assert_eq!(ctx.state.right.windows.len(), 1, "cooldown must suppress drift eject");
+        assert!(!ctx.state.ignored_windows.contains(&1));
+    }
+
+    #[test]
+    fn test_wlc_drift_after_cooldown_expires_ejects_normally() {
+        // Given: a tracked panel window whose cooldown_until is in the past.
+        let temp_dir = tempdir().unwrap();
+        let w1 = mock_window(1, false, true, 1, Some((400.0, 300.0)));
+        let mock = MockNiri::new(vec![w1]);
+        let mut state = AppState::default();
+        state.right.windows.push(WindowState {
+            id: 1,
+            width: 1000,
+            height: 800,
+            is_floating: false,
+            position: None,
+            cooldown_until: Some(now_ms() - 1_000), // a second ago
+            last_applied: Some(crate::ExpectedLayout {
+                x: 1600, y: 50, width: 300, height: 980,
+            }),
+        });
+        let mut ctx = Ctx {
+            state,
+            config: crate::test_utils::mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+        let changes = vec![(1, reported_at(Some((400.0, 300.0)), (300, 980)))];
+
+        // When: the WLC handler runs.
+        process_window_layouts_changed(&mut ctx, &changes).expect("WLC failed");
+
+        // Then: cooldown is over, so drift detection resumes normally and
+        // the window is ejected.
+        assert!(ctx.state.right.windows.is_empty(), "expired cooldown must not block eject");
+        assert!(ctx.state.ignored_windows.contains(&1));
     }
 }

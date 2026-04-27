@@ -51,6 +51,8 @@ mod tests {
             height: 500,
             is_floating: true,
             position: Some((1.0, 2.0)),
+            cooldown_until: None,
+            last_applied: None,
         });
         state.right.windows.push(WindowState {
             id: 500,
@@ -58,6 +60,8 @@ mod tests {
             height: 500,
             is_floating: true,
             position: Some((1.0, 2.0)),
+            cooldown_until: None,
+            last_applied: None,
         });
         // Left panel tracks id=700.
         state.left.windows.push(WindowState {
@@ -66,6 +70,8 @@ mod tests {
             height: 500,
             is_floating: true,
             position: Some((1.0, 2.0)),
+            cooldown_until: None,
+            last_applied: None,
         });
 
         let source_ws = 2;

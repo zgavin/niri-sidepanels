@@ -8,6 +8,7 @@ pub mod window_rules;
 use std::path::PathBuf;
 
 use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 
 pub use crate::config::{Config, Side};
 pub use crate::niri::NiriClient;
@@ -31,6 +32,23 @@ pub enum Direction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowTarget {
+    pub width: i32,
+    pub height: i32,
+}
+
+/// What the daemon thinks a panel window should look like right now. Computed
+/// from config + state + niri's current window list. Lives at lib.rs so it
+/// can be both produced/consumed by `commands::reorder` and stored in
+/// `state::WindowState` (`last_applied`) without a circular module
+/// dependency.
+///
+/// Coordinates are in **output-relative space** (matching niri's
+/// `tile_pos_in_workspace_view` reports for floating windows). `apply_layouts`
+/// translates back to working-area coords before sending niri actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpectedLayout {
+    pub x: i32,
+    pub y: i32,
     pub width: i32,
     pub height: i32,
 }

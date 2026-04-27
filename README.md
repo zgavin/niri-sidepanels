@@ -137,6 +137,17 @@ bottom = 0    # height of your bottom bar; 0 if none
 
 Both default to 0, so users without bars (or who haven't run into the issue) can leave the section out entirely.
 
+### Animation cooldown
+
+When a reorder fires, niri animates each affected window to its new slot and emits `WindowLayoutsChanged` events for the intermediate frames. Without a cooldown, the daemon would treat those animation frames as user drift and eject the window mid-animation. The daemon ignores drift checks for a configurable window after every reorder.
+
+```toml
+[animation]
+cooldown_ms = 500   # default
+```
+
+Tune this to roughly the duration of niri's longest window-move animation. Bump it up if you've slowed niri's animations down (e.g. via `animations { window-movement { duration-ms 800; } }` in `config.kdl`); leave it at the default if you use stock niri animations.
+
 ### Window rules
 
 Window rules let you customize behavior for specific windows by `app_id` or `title`. Rules are evaluated in order; the first match applies. Omitted fields fall back to the panel's defaults.
