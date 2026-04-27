@@ -6,6 +6,19 @@ use crate::{Ctx, WindowTarget};
 use anyhow::Result;
 use niri_ipc::{Action, PositionChange, SizeChange, Window, WindowLayout};
 use std::collections::HashSet;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Wall-clock millis since the Unix epoch. Used to set / compare per-window
+/// cooldown deadlines for the eject-on-drag logic. Falls back to 0 if the
+/// system clock is somehow before 1970, which would only happen if the host
+/// clock is wildly broken — in which case cooldowns will never trigger,
+/// which degrades gracefully back to PR #6's behavior.
+pub(crate) fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 /// Never shrink a panel window below this height even if many windows are
 /// stacked. Prevents division producing unusable or negative heights.
@@ -132,6 +145,10 @@ pub fn reorder<C: NiriClient>(ctx: &mut Ctx<C>) -> Result<()> {
         reorder_side(ctx, side, &all_windows, current_ws, (display_w, display_h))?;
     }
 
+    // reorder_side may have set per-window cooldown timestamps; persist them
+    // so the WLC handler in the daemon process sees the same values that the
+    // user-CLI invocation just wrote.
+    save_state(&ctx.state, &ctx.cache_dir)?;
     Ok(())
 }
 
@@ -265,6 +282,21 @@ fn reorder_side<C: NiriClient>(
         &mut layouts,
     );
     apply_layouts(&mut ctx.socket, &layouts);
+
+    // Mark each affected window as "still settling" so the WLC handler can
+    // distinguish niri's animation frames from real user moves. The
+    // cooldown deadline is the same for every window in this pass — they
+    // were all sent simultaneously and will animate in parallel.
+    if !layouts.is_empty() {
+        let cooldown_end = now_ms() + ctx.config.animation.cooldown_ms;
+        let layout_ids: HashSet<u64> = layouts.iter().map(|(id, _)| *id).collect();
+        let panel_state = ctx.state.panel_mut(side);
+        for w in &mut panel_state.windows {
+            if layout_ids.contains(&w.id) {
+                w.cooldown_until = Some(cooldown_end);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -293,6 +325,7 @@ mod tests {
             height: 200,
             is_floating: false,
             position: None,
+            cooldown_until: None,
         }
     }
 
@@ -915,5 +948,40 @@ mod tests {
         assert_eq!(layouts.len(), 1);
         assert_eq!(layouts[0].1.height, 980);
         assert_eq!(layouts[0].1.y, 50);
+    }
+
+    #[test]
+    fn test_reorder_sets_cooldown_on_affected_windows() {
+        // Given: a tracked panel window with no cooldown set.
+        let temp_dir = tempdir().unwrap();
+        let w1 = mock_window(1, false, true, 1, None);
+        let mock = MockNiri::new(vec![w1]);
+        let state = AppState {
+            right: panel_state_with(vec![win_state(1)]),
+            ..Default::default()
+        };
+        let mut ctx = Ctx {
+            state,
+            config: mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+        let before_call = now_ms();
+
+        // When: we run a full reorder.
+        reorder(&mut ctx).expect("reorder failed");
+
+        // Then: the window's cooldown_until is set to a time roughly
+        // `cooldown_ms` (default 500) in the future. We allow some slack to
+        // account for clock granularity and test execution time.
+        let cooldown = ctx.state.right.windows[0]
+            .cooldown_until
+            .expect("cooldown must be set after a reorder");
+        let expected_cooldown_lower = before_call + ctx.config.animation.cooldown_ms - 50;
+        let expected_cooldown_upper = now_ms() + ctx.config.animation.cooldown_ms;
+        assert!(
+            cooldown >= expected_cooldown_lower && cooldown <= expected_cooldown_upper,
+            "cooldown {cooldown} should land in [{expected_cooldown_lower}, {expected_cooldown_upper}]"
+        );
     }
 }

@@ -43,6 +43,7 @@ pub fn add_to_panel<C: NiriClient>(ctx: &mut Ctx<C>, side: Side, window: &Window
         height,
         is_floating: window.is_floating,
         position: window.layout.tile_pos_in_workspace_view,
+        cooldown_until: None,
     };
     ctx.state.panel_mut(side).windows.push(w_state);
 
@@ -205,6 +206,7 @@ mod tests {
             height: 800,
             is_floating: true,
             position: Some((1.0, 2.0)),
+            cooldown_until: None,
         });
 
         let mut ctx = Ctx {
@@ -247,6 +249,7 @@ mod tests {
             height: 800,
             is_floating: true,
             position: Some((1.0, 2.0)),
+            cooldown_until: None,
         });
 
         let mut ctx = Ctx {

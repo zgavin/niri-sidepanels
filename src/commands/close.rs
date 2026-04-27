@@ -57,6 +57,7 @@ mod tests_close {
             height: 100,
             is_floating: false,
             position: None,
+            cooldown_until: None,
         });
 
         let mut ctx = Ctx {
@@ -88,6 +89,7 @@ mod tests_close {
             height: 100,
             is_floating: false,
             position: None,
+            cooldown_until: None,
         });
         state.right.windows.push(WindowState {
             id: 20,
@@ -95,6 +97,7 @@ mod tests_close {
             height: 100,
             is_floating: false,
             position: None,
+            cooldown_until: None,
         });
 
         let mut ctx = Ctx {
@@ -131,6 +134,7 @@ mod tests_close {
             height: 100,
             is_floating: false,
             position: None,
+            cooldown_until: None,
         });
 
         let mut ctx = Ctx {

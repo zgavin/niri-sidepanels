@@ -12,6 +12,13 @@
 # top = 30
 # bottom = 0
 
+# How long the daemon should ignore drift checks after a reorder, so niri's
+# own animation frames aren't mistaken for the user dragging a window. Set
+# to roughly the duration of niri's longest window-move animation; tune up
+# if you've slowed niri's animations down. Default 500.
+# [animation]
+# cooldown_ms = 500
+
 [left]
 enabled = false
 # Panel width in pixels.

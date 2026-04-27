@@ -1,6 +1,6 @@
 use crate::commands::movefrom::move_to;
 use crate::commands::reorder;
-use crate::commands::reorder::{LayoutCheck, check_layout, compute_layouts};
+use crate::commands::reorder::{LayoutCheck, check_layout, compute_layouts, now_ms};
 use crate::commands::togglewindow::add_to_panel;
 use crate::config::{Side, load_config};
 use crate::niri::connect;
@@ -167,11 +167,27 @@ pub fn process_window_layouts_changed<C: NiriClient>(
 
     let expected = compute_layouts(&ctx.config, &ctx.state, &all_windows, current_ws, screen);
 
+    let now = now_ms();
     let mut to_eject: Vec<(Side, u64)> = Vec::new();
     for (id, reported) in changes {
         let Some(side) = ctx.state.side_of(*id) else {
             continue;
         };
+
+        // Skip drift checks for windows still inside their post-reorder
+        // cooldown window — niri's animation frames otherwise look like
+        // user moves and we'd false-eject.
+        let panel_state = ctx.state.panel(side);
+        let is_settling = panel_state
+            .windows
+            .iter()
+            .find(|w| w.id == *id)
+            .and_then(|w| w.cooldown_until)
+            .is_some_and(|deadline| deadline > now);
+        if is_settling {
+            continue;
+        }
+
         let Some((_, expected_layout)) = expected.iter().find(|(eid, _)| eid == id) else {
             // Window is panel-tracked but not in the computed layout — likely
             // on a different workspace right now. Skip.
@@ -227,6 +243,7 @@ mod tests {
                 height: 500,
                 is_floating: false,
                 position: None,
+                cooldown_until: None,
             },
             WindowState {
                 id: 200,
@@ -234,6 +251,7 @@ mod tests {
                 height: 500,
                 is_floating: true,
                 position: Some((1.0, 2.0)),
+                cooldown_until: None,
             },
         ]);
 
@@ -267,6 +285,7 @@ mod tests {
             height: 500,
             is_floating: false,
             position: None,
+            cooldown_until: None,
         });
         let mock = MockNiri::new(vec![]);
         let mut ctx = Ctx {
@@ -290,6 +309,7 @@ mod tests {
             height: 200,
             is_floating: true,
             position: Some((1.0, 2.0)),
+            cooldown_until: None,
         });
         state.right.windows.push(WindowState {
             id: 20,
@@ -297,6 +317,7 @@ mod tests {
             height: 200,
             is_floating: true,
             position: Some((1.0, 2.0)),
+            cooldown_until: None,
         });
 
         let w10 = mock_window(10, true, false, 1, Some((1.0, 2.0)));
@@ -470,6 +491,7 @@ mod tests {
             height: 800,
             is_floating: false,
             position: None,
+            cooldown_until: None,
         }
     }
 
@@ -641,5 +663,73 @@ mod tests {
         // stays put and 999 is not pushed to ignored_windows.
         assert_eq!(ctx.state.right.windows.len(), 1);
         assert!(!ctx.state.ignored_windows.contains(&999));
+    }
+
+    #[test]
+    fn test_wlc_drift_during_cooldown_does_not_eject() {
+        // Given: a tracked panel window whose niri-reported position is far
+        // from the panel's expected slot — what would normally trigger an
+        // eject — but the window has a cooldown_until in the future,
+        // meaning we recently sent it a reorder and niri is still animating.
+        let temp_dir = tempdir().unwrap();
+        let w1 = mock_window(1, false, true, 1, Some((400.0, 300.0)));
+        let mock = MockNiri::new(vec![w1]);
+        let mut state = AppState::default();
+        state.right.windows.push(WindowState {
+            id: 1,
+            width: 1000,
+            height: 800,
+            is_floating: false,
+            position: None,
+            cooldown_until: Some(now_ms() + 60_000), // a minute in the future
+        });
+        let mut ctx = Ctx {
+            state,
+            config: crate::test_utils::mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+        let changes = vec![(1, reported_at(Some((400.0, 300.0)), (300, 980)))];
+
+        // When: the WLC handler runs.
+        process_window_layouts_changed(&mut ctx, &changes).expect("WLC failed");
+
+        // Then: no eject — the window stays tracked even though the reported
+        // position differs from expected. The cooldown protects niri's own
+        // animation frames from being treated as user drift.
+        assert_eq!(ctx.state.right.windows.len(), 1, "cooldown must suppress drift eject");
+        assert!(!ctx.state.ignored_windows.contains(&1));
+    }
+
+    #[test]
+    fn test_wlc_drift_after_cooldown_expires_ejects_normally() {
+        // Given: a tracked panel window whose cooldown_until is in the past.
+        let temp_dir = tempdir().unwrap();
+        let w1 = mock_window(1, false, true, 1, Some((400.0, 300.0)));
+        let mock = MockNiri::new(vec![w1]);
+        let mut state = AppState::default();
+        state.right.windows.push(WindowState {
+            id: 1,
+            width: 1000,
+            height: 800,
+            is_floating: false,
+            position: None,
+            cooldown_until: Some(now_ms() - 1_000), // a second ago
+        });
+        let mut ctx = Ctx {
+            state,
+            config: crate::test_utils::mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+        let changes = vec![(1, reported_at(Some((400.0, 300.0)), (300, 980)))];
+
+        // When: the WLC handler runs.
+        process_window_layouts_changed(&mut ctx, &changes).expect("WLC failed");
+
+        // Then: cooldown is over, so drift detection resumes normally and
+        // the window is ejected.
+        assert!(ctx.state.right.windows.is_empty(), "expired cooldown must not block eject");
+        assert!(ctx.state.ignored_windows.contains(&1));
     }
 }

@@ -111,6 +111,7 @@ mod tests {
             height: h,
             is_floating: false,
             position: None,
+            cooldown_until: None,
         }
     }
 
@@ -152,6 +153,7 @@ mod tests {
             height: 800,
             is_floating: true,
             position: Some((1.0, 2.0)),
+            cooldown_until: None,
         });
 
         let mut ctx = Ctx {
@@ -261,6 +263,7 @@ mod tests {
             height: 800,
             is_floating: true,
             position: Some((5.0, 6.0)),
+            cooldown_until: None,
         });
 
         let mut ctx = Ctx {
@@ -294,6 +297,7 @@ mod tests {
             height: 800,
             is_floating: false,
             position: None,
+            cooldown_until: None,
         });
 
         let mut ctx = Ctx {

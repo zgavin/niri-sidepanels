@@ -37,6 +37,8 @@ pub struct Config {
     #[serde(default)]
     pub bars: Bars,
     #[serde(default)]
+    pub animation: Animation,
+    #[serde(default)]
     pub window_rule: Vec<WindowRule>,
 }
 
@@ -46,9 +48,42 @@ impl Default for Config {
             left: Panel::default(),
             right: default_right_panel(),
             bars: Bars::default(),
+            animation: Animation::default(),
             window_rule: vec![],
         }
     }
+}
+
+/// Tunables for how the daemon handles niri's animations.
+///
+/// Whenever we send a reorder pass (toggle, send, flip, hide, eject, etc.),
+/// niri animates each affected window from its current position to the new
+/// one. Niri emits `WindowLayoutsChanged` events for intermediate frames; if
+/// we ran the eject-on-drag check on those, we'd treat the animation itself
+/// as a user move and eject the window. So we mark each touched window as
+/// "still settling" for `cooldown_ms` after the reorder, and skip drift
+/// checks during that window.
+///
+/// The default of 500ms covers niri's stock animation config. If you've sped
+/// niri's animations up or slowed them down, tune this to match — too short
+/// causes spurious ejects, too long means the user has to drag-and-pause
+/// before we react.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub struct Animation {
+    #[serde(default = "default_cooldown_ms")]
+    pub cooldown_ms: i64,
+}
+
+impl Default for Animation {
+    fn default() -> Self {
+        Self {
+            cooldown_ms: default_cooldown_ms(),
+        }
+    }
+}
+
+fn default_cooldown_ms() -> i64 {
+    500
 }
 
 /// Vertical space that niri's working area excludes from the output —

@@ -107,6 +107,7 @@ pub fn mock_config() -> Config {
         },
         right: panel,
         bars: crate::config::Bars::default(),
+        animation: crate::config::Animation::default(),
         window_rule: vec![],
     }
 }

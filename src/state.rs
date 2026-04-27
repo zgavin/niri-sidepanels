@@ -58,6 +58,13 @@ pub struct WindowState {
     pub height: i32,
     pub is_floating: bool,
     pub position: Option<(f64, f64)>,
+    /// Unix-millis timestamp until which drift checks should be skipped for
+    /// this window — we recently sent it reorder actions and niri is still
+    /// animating to the new layout. `None` means no cooldown active.
+    /// `#[serde(default)]` so existing on-disk state files stay readable
+    /// after the schema change.
+    #[serde(default)]
+    pub cooldown_until: Option<i64>,
 }
 
 pub fn get_default_cache_dir() -> Result<PathBuf> {
@@ -103,6 +110,7 @@ mod tests {
             height: 400,
             is_floating: false,
             position: None,
+            cooldown_until: None,
         };
         let w2 = WindowState {
             id: 200,
@@ -110,6 +118,7 @@ mod tests {
             height: 1080,
             is_floating: true,
             position: Some((1.0, 2.0)),
+            cooldown_until: None,
         };
 
         let original_state = AppState {
@@ -165,6 +174,7 @@ mod tests {
             height: 100,
             is_floating: false,
             position: None,
+            cooldown_until: None,
         });
         state.right.windows.push(WindowState {
             id: 2,
@@ -172,6 +182,7 @@ mod tests {
             height: 100,
             is_floating: false,
             position: None,
+            cooldown_until: None,
         });
 
         assert_eq!(state.side_of(1), Some(Side::Left));
