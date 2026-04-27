@@ -224,9 +224,11 @@ pub fn reorder<C: NiriClient>(ctx: &mut Ctx<C>) -> Result<()> {
 }
 
 /// Compute the expected layout for every panel-tracked window currently on
-/// the active workspace. Pure function — same inputs, same outputs, no I/O.
-/// Used both by `reorder` (to drive niri actions) and by the
-/// `WindowLayoutsChanged` listener (to compare against reported layouts).
+/// the active workspace, across both sides. Pure function — same inputs,
+/// same outputs, no I/O. Production code uses `compute_layout_for_side`
+/// directly (one side per call); this thin wrapper exists only for tests
+/// that want the convenience of "give me everything."
+#[cfg(test)]
 pub(crate) fn compute_layouts(
     config: &Config,
     state: &AppState,
