@@ -616,6 +616,32 @@ binds {
     }
 
     #[test]
+    fn test_update_struts_lowers_value_when_panel_empties() {
+        // Given: niri config where we previously wrote a non-empty-panel
+        // strut value of 500 (= 100 base + 400 panel width).
+        let input = "layout {\n    struts {\n        left 500\n    }\n}\n";
+
+        // When: we update with the empty-panel value (just the base).
+        let output = update_struts_in_kdl(input, &[(Side::Left, 100)]).unwrap();
+
+        // Then: the strut comes down to the base. This is the
+        // toggle-window-out → reorder → sync path. Catches a regression
+        // where the value would only ever go *up* but not back down.
+        let doc: KdlDocument = output.parse().unwrap();
+        let l = doc
+            .get("layout").unwrap()
+            .children().unwrap()
+            .get("struts").unwrap()
+            .children().unwrap()
+            .get("left").unwrap()
+            .entries()[0]
+            .value()
+            .as_integer()
+            .unwrap();
+        assert_eq!(l, 100, "value must come back down when panel empties");
+    }
+
+    #[test]
     fn test_desired_struts_supports_zero_and_negative_base() {
         // Given: right panel with strut = 0 (just panel width, no padding)
         // and one tracked window. niri allows negative struts too — they
