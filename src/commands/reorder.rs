@@ -45,17 +45,30 @@ pub(crate) enum LayoutCheck {
 }
 
 /// Compare a niri-reported `WindowLayout` against a daemon-computed
-/// `ExpectedLayout`.
+/// `ExpectedLayout`. Drift is **position-only** — size differences are
+/// intentionally ignored, for two reasons:
+///
+/// 1. Apps with a hard minimum size (VS Code, etc.) refuse niri's
+///    `SetWindowWidth` requests when our panel width is below their
+///    minimum. niri reports the app's actual size, which differs from
+///    our expected. Treating that as drift would eject the window on
+///    every reorder pass — the panel would be unusable for any
+///    min-size app.
+/// 2. niri's interactive resize emits WLC per-frame (unlike interactive
+///    move). Treating size drift as drift would eject the window on the
+///    first frame, interrupting the user mid-action.
+///
+/// Position-drift catches the user-drag case, which is the primary
+/// "I want this out of the panel" affordance. Resize-as-eject is left
+/// out deliberately — see `v3_dynamic_panels.md` for the long-term
+/// vision where resize reshapes the panel rather than ejecting from it.
 pub(crate) fn check_layout(expected: &ExpectedLayout, reported: &WindowLayout) -> LayoutCheck {
     let Some((rx, ry)) = reported.tile_pos_in_workspace_view else {
         return LayoutCheck::Insufficient;
     };
     let pos_drift = (rx - expected.x as f64).abs() >= LAYOUT_TOLERANCE_PX
         || (ry - expected.y as f64).abs() >= LAYOUT_TOLERANCE_PX;
-    let (rw, rh) = reported.window_size;
-    let size_drift = ((rw - expected.width).abs() as f64) >= LAYOUT_TOLERANCE_PX
-        || ((rh - expected.height).abs() as f64) >= LAYOUT_TOLERANCE_PX;
-    if pos_drift || size_drift {
+    if pos_drift {
         LayoutCheck::Drift
     } else {
         LayoutCheck::Match
@@ -892,16 +905,19 @@ mod tests {
     }
 
     #[test]
-    fn test_check_layout_size_drift() {
-        // Given: position matches but width has changed by 50 — user resized.
+    fn test_check_layout_size_difference_is_not_drift() {
+        // Given: position matches exactly but width has changed by 50.
         let expected = ExpectedLayout { x: 100, y: 200, width: 300, height: 400 };
         let reported = reported_at(Some((100.0, 200.0)), (350, 400));
 
         // When: we compare.
         let check = check_layout(&expected, &reported);
 
-        // Then: result is Drift — resize counts the same as a move.
-        assert_eq!(check, LayoutCheck::Drift);
+        // Then: Match. Size differences are deliberately ignored — apps
+        // with min-size constraints (VS Code etc.) routinely refuse our
+        // SetWindowWidth, and we don't want to eject them every reorder.
+        // See the doc on `check_layout` for the full reasoning.
+        assert_eq!(check, LayoutCheck::Match);
     }
 
     #[test]

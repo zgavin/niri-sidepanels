@@ -606,9 +606,11 @@ mod tests {
     }
 
     #[test]
-    fn test_wlc_drift_size_ejects() {
+    fn test_wlc_size_only_change_does_not_eject() {
         // Given: a previously-positioned tracked window at its expected
-        // position but with a user-resized width (300 → 500).
+        // position but with a different reported width (300 → 500). Either
+        // the user is mid-resize (niri's interactive resize emits per-frame
+        // WLC) or the app refuses our requested width (VS Code-style).
         let temp_dir = tempdir().unwrap();
         let w1 = mock_window(1, false, true, 1, Some((1600.0, 50.0)));
         let mock = MockNiri::new(vec![w1]);
@@ -628,9 +630,11 @@ mod tests {
         // When: the WLC handler runs.
         process_window_layouts_changed(&mut ctx, &changes).expect("WLC failed");
 
-        // Then: a resize triggers an eject just like a move does.
-        assert!(ctx.state.right.windows.is_empty());
-        assert!(ctx.state.ignored_windows.contains(&1));
+        // Then: no eject. Position-only drift means a size mismatch is
+        // tolerated, both during interactive resize (don't interrupt) and
+        // for apps with hard min-size constraints (don't constantly bounce).
+        assert_eq!(ctx.state.right.windows.len(), 1);
+        assert!(!ctx.state.ignored_windows.contains(&1));
     }
 
     #[test]
