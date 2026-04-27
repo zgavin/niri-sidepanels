@@ -93,6 +93,7 @@ pub fn mock_config() -> Config {
         peek: 10,
         focus_peek: Some(50),
         sticky: false,
+        strut: None,
         margins: Margins {
             top: 50,
             right: 20,

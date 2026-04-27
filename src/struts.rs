@@ -1,18 +1,19 @@
 //! Manages the `layout { struts { left N right N } }` block in the user's niri
 //! `config.kdl` so that the niri tape's reserved width tracks the sidepanels'
-//! occupancy. Pure KDL manipulation lives here; the daemon-wiring that
-//! triggers it on state changes lives in `commands::reorder` (PR #8).
+//! occupancy. The pure KDL manipulation (`update_struts_in_kdl`) is below;
+//! `sync_struts_to_niri_config` is the daemon-side wrapper that reads the
+//! file, computes desired values from current panel state, writes if the
+//! result differs, and asks niri to reload its config.
 
-use crate::config::Side;
+use crate::config::{Panel, Side};
+use crate::niri::NiriClient;
+use crate::state::AppState;
+use crate::Ctx;
 use anyhow::{Context, Result};
 use kdl::{KdlDocument, KdlDocumentFormat, KdlEntry};
+use niri_ipc::Action;
 use std::fs;
 use std::path::{Path, PathBuf};
-
-/// Trailing comment we attach to every `left` / `right` line we write so a
-/// human reading the niri config can see at a glance that a tool is editing
-/// these specific values.
-const MANAGED_TRAILING_COMMENT: &str = " // niri-sidepanels: managed";
 
 /// Suffix used for the one-time backup of the user's niri config the first
 /// time we touch it.
@@ -32,8 +33,11 @@ pub fn update_struts_in_kdl(kdl_text: &str, updates: &[(Side, i32)]) -> Result<S
         return Ok(kdl_text.to_string());
     }
 
-    let mut doc: KdlDocument = kdl_text
-        .parse()
+    // niri uses KDL v1 syntax (via the `knuffel` crate), not the v2 default
+    // of the `kdl` crate. Use `parse_v1` for the input and `ensure_v1` +
+    // `to_string` for the output so the round-trip stays in v1 form niri
+    // can parse.
+    let mut doc = KdlDocument::parse_v1(kdl_text)
         .map_err(|e| anyhow::anyhow!("failed to parse niri config as KDL: {e}"))?;
 
     // Ensure `layout > struts` exists with reasonable formatting. We seed any
@@ -42,8 +46,7 @@ pub fn update_struts_in_kdl(kdl_text: &str, updates: &[(Side, i32)]) -> Result<S
     // (constructing nested `KdlNode::new(...)`s manually produces ugly output
     // like `layout{` with no space).
     if doc.get("layout").is_none() {
-        let scaffold: KdlDocument = "layout {\n    struts {\n    }\n}\n"
-            .parse()
+        let scaffold = KdlDocument::parse_v1("layout {\n    struts {\n    }\n}\n")
             .expect("layout scaffold must be valid KDL");
         for node in scaffold.nodes() {
             doc.nodes_mut().push(node.clone());
@@ -52,8 +55,7 @@ pub fn update_struts_in_kdl(kdl_text: &str, updates: &[(Side, i32)]) -> Result<S
     let layout = doc.get_mut("layout").expect("just ensured");
     let layout_children = layout.ensure_children();
     if layout_children.get("struts").is_none() {
-        let scaffold: KdlDocument = "    struts {\n    }\n"
-            .parse()
+        let scaffold = KdlDocument::parse_v1("    struts {\n    }\n")
             .expect("struts scaffold must be valid KDL");
         for node in scaffold.nodes() {
             layout_children.nodes_mut().push(node.clone());
@@ -82,6 +84,9 @@ pub fn update_struts_in_kdl(kdl_text: &str, updates: &[(Side, i32)]) -> Result<S
         upsert_managed_strut(struts_children, key, *value);
     }
 
+    // Convert the document representation back to v1 syntax before
+    // serializing, so niri (which only parses v1) can read the result.
+    doc.ensure_v1();
     Ok(doc.to_string())
 }
 
@@ -96,11 +101,11 @@ fn upsert_managed_strut(doc: &mut KdlDocument, key: &str, value: i32) {
         return;
     }
 
-    // New node: parse a template so the comment, spacing, and terminator are
-    // all handled by KDL's own parser/serializer round-trip.
-    let template = format!("{key} {value}{MANAGED_TRAILING_COMMENT}\n");
-    let parsed: KdlDocument = template
-        .parse()
+    // New node: parse a template so spacing and terminator are handled by
+    // KDL's own parser/serializer round-trip. v1 syntax for consistency
+    // with niri's expectations (see `update_struts_in_kdl`).
+    let template = format!("{key} {value}\n");
+    let parsed = KdlDocument::parse_v1(&template)
         .expect("our own managed-strut template must always be valid KDL");
     let mut new_node = parsed
         .nodes()
@@ -178,6 +183,75 @@ pub fn atomic_write(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
+/// Compute the desired strut values for each managed side, given panel
+/// config and current state.
+///
+/// - Side with `panel.strut == None` → not managed, no entry in result.
+/// - Side empty → `panel.strut`.
+/// - Side non-empty → `panel.strut + panel.width`.
+pub(crate) fn desired_struts(config: &crate::config::Config, state: &AppState) -> Vec<(Side, i32)> {
+    let mut out = Vec::new();
+    for side in Side::ALL {
+        let panel: &Panel = config.panel(side);
+        let Some(base) = panel.strut else { continue };
+        let value = if state.panel(side).windows.is_empty() {
+            base
+        } else {
+            base + panel.width
+        };
+        out.push((side, value));
+    }
+    out
+}
+
+/// Read the user's niri config, compute the desired strut block from
+/// current panel state, write it back if different, and ask niri to
+/// reload. No-op when no side has `strut` configured (the user hasn't
+/// opted in to managed struts at all).
+///
+/// Best-effort throughout: locate / read / write / reload errors are
+/// surfaced via `Result` but the daemon's caller can choose to log and
+/// continue rather than abort the whole reorder.
+pub fn sync_struts_to_niri_config<C: NiriClient>(ctx: &mut Ctx<C>) -> Result<()> {
+    let updates = desired_struts(&ctx.config, &ctx.state);
+    if updates.is_empty() {
+        return Ok(()); // No side opted in.
+    }
+
+    let path = locate_niri_config()?;
+    let current = if path.exists() {
+        fs::read_to_string(&path)
+            .with_context(|| format!("failed to read niri config at {path:?}"))?
+    } else {
+        String::new()
+    };
+
+    let new_content = update_struts_in_kdl(&current, &updates)?;
+    if new_content == current {
+        return Ok(()); // Already correct; no write, no reload.
+    }
+
+    backup_if_first_time(&path)?;
+    // If the config didn't exist before (fresh install), make sure the
+    // parent directory does.
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create niri config dir {parent:?}"))?;
+    }
+    atomic_write(&path, &new_content)?;
+
+    // Ask niri to reload the file we just wrote. Errors here mean niri's
+    // socket rejected the action — log and continue rather than failing
+    // the user's command. (Most likely cause: niri isn't running, in which
+    // case the next start will pick up the updated config anyway.)
+    if let Err(e) = ctx.socket.send_action(Action::LoadConfigFile {}) {
+        eprintln!("niri-sidepanels: failed to ask niri to reload config: {e}");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,13 +281,8 @@ mod tests {
         let output =
             update_struts_in_kdl(input, &[(Side::Left, 100), (Side::Right, 200)]).unwrap();
 
-        // Then: a layout > struts block is created with both values, and our
-        // marker comment is present so it's clear who wrote them.
+        // Then: a layout > struts block is created with both values.
         assert_left_right(&output, 100, 200);
-        assert!(
-            output.contains("niri-sidepanels: managed"),
-            "marker comment must be on the managed lines"
-        );
     }
 
     #[test]
@@ -433,5 +502,170 @@ binds {
         assert_eq!(fs::read_to_string(&path).unwrap(), "new content");
         let leftover_tmp = dir.path().join(".config.kdl.niri-sidepanels.tmp");
         assert!(!leftover_tmp.exists(), "temp file must be renamed away");
+    }
+
+    use crate::config::{Config, Panel};
+    use crate::state::{PanelState, WindowState};
+
+    fn ws(id: u64) -> WindowState {
+        WindowState {
+            id,
+            width: 100,
+            height: 100,
+            is_floating: false,
+            position: None,
+            cooldown_until: None,
+            last_applied: None,
+        }
+    }
+
+    #[test]
+    fn test_desired_struts_no_managed_sides_returns_empty() {
+        // Given: a config with `strut = None` on both sides (the user has
+        // not opted in to managed struts at all).
+        let config = Config::default();
+        let state = AppState::default();
+
+        // When: we compute desired struts.
+        let updates = desired_struts(&config, &state);
+
+        // Then: no entries — the helper short-circuits without touching
+        // the niri config at all.
+        assert!(updates.is_empty());
+    }
+
+    #[test]
+    fn test_desired_struts_empty_panel_uses_base() {
+        // Given: right panel managed with `strut = 20`, no windows tracked.
+        let mut config = Config::default();
+        config.right = Panel {
+            enabled: true,
+            width: 400,
+            strut: Some(20),
+            ..Panel::default()
+        };
+        let state = AppState::default();
+
+        // When: we compute desired struts.
+        let updates = desired_struts(&config, &state);
+
+        // Then: just the base value — no panel.width added because there's
+        // nothing in the panel.
+        assert_eq!(updates, vec![(Side::Right, 20)]);
+    }
+
+    #[test]
+    fn test_desired_struts_non_empty_panel_adds_width() {
+        // Given: right panel managed with `strut = 20`, one tracked window.
+        let mut config = Config::default();
+        config.right = Panel {
+            enabled: true,
+            width: 400,
+            strut: Some(20),
+            ..Panel::default()
+        };
+        let mut state = AppState::default();
+        state.right = PanelState {
+            windows: vec![ws(1)],
+            is_hidden: false,
+            is_flipped: false,
+        };
+
+        // When: we compute desired struts.
+        let updates = desired_struts(&config, &state);
+
+        // Then: 20 + 400 = 420. Panel windows + base padding.
+        assert_eq!(updates, vec![(Side::Right, 420)]);
+    }
+
+    #[test]
+    fn test_desired_struts_only_includes_managed_sides() {
+        // Given: left managed (strut Some), right unmanaged (strut None).
+        let mut config = Config::default();
+        config.left = Panel {
+            enabled: true,
+            width: 400,
+            strut: Some(0),
+            ..Panel::default()
+        };
+        config.right = Panel {
+            enabled: true,
+            width: 400,
+            strut: None,
+            ..Panel::default()
+        };
+        let mut state = AppState::default();
+        state.left = PanelState {
+            windows: vec![ws(1)],
+            is_hidden: false,
+            is_flipped: false,
+        };
+        // Right has windows too, but we're not managing its strut.
+        state.right = PanelState {
+            windows: vec![ws(2)],
+            is_hidden: false,
+            is_flipped: false,
+        };
+
+        // When: we compute desired struts.
+        let updates = desired_struts(&config, &state);
+
+        // Then: only the left entry. Right is left untouched in niri's
+        // config — the user owns it.
+        assert_eq!(updates, vec![(Side::Left, 400)]);
+    }
+
+    #[test]
+    fn test_update_struts_lowers_value_when_panel_empties() {
+        // Given: niri config where we previously wrote a non-empty-panel
+        // strut value of 500 (= 100 base + 400 panel width).
+        let input = "layout {\n    struts {\n        left 500\n    }\n}\n";
+
+        // When: we update with the empty-panel value (just the base).
+        let output = update_struts_in_kdl(input, &[(Side::Left, 100)]).unwrap();
+
+        // Then: the strut comes down to the base. This is the
+        // toggle-window-out → reorder → sync path. Catches a regression
+        // where the value would only ever go *up* but not back down.
+        let doc: KdlDocument = output.parse().unwrap();
+        let l = doc
+            .get("layout").unwrap()
+            .children().unwrap()
+            .get("struts").unwrap()
+            .children().unwrap()
+            .get("left").unwrap()
+            .entries()[0]
+            .value()
+            .as_integer()
+            .unwrap();
+        assert_eq!(l, 100, "value must come back down when panel empties");
+    }
+
+    #[test]
+    fn test_desired_struts_supports_zero_and_negative_base() {
+        // Given: right panel with strut = 0 (just panel width, no padding)
+        // and one tracked window. niri allows negative struts too — they
+        // extend the working area past the screen edge.
+        let mut config = Config::default();
+        config.right = Panel {
+            enabled: true,
+            width: 400,
+            strut: Some(0),
+            ..Panel::default()
+        };
+        let mut state = AppState::default();
+        state.right = PanelState {
+            windows: vec![ws(1)],
+            is_hidden: false,
+            is_flipped: false,
+        };
+
+        // When/Then: zero base, non-empty → just panel.width.
+        assert_eq!(desired_struts(&config, &state), vec![(Side::Right, 400)]);
+
+        // And: negative base, empty → write the negative value through.
+        config.right.strut = Some(-50);
+        state.right.windows.clear();
+        assert_eq!(desired_struts(&config, &state), vec![(Side::Right, -50)]);
     }
 }
