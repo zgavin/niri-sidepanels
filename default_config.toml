@@ -35,6 +35,13 @@ peek = 10
 focus_peek = 50
 # Whether the panel follows you when you switch workspaces.
 sticky = false
+# Optional managed-strut base value, in pixels. When set, niri-sidepanels
+# keeps `layout.struts.left` in your `niri/config.kdl` in sync with this
+# panel's occupancy (empty panel → `strut`; non-empty → `strut + width`).
+# Omit to leave struts on this side untouched. Negative values are
+# allowed (niri permits them — they extend the working area past the
+# edge). Comment out to disable managed struts on this side.
+# strut = 20
 
 [left.margins]
 top = 50
@@ -50,6 +57,7 @@ gap = 10
 peek = 10
 focus_peek = 50
 sticky = false
+# strut = 20
 
 [right.margins]
 top = 50

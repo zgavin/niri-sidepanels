@@ -148,6 +148,22 @@ cooldown_ms = 500   # default
 
 Tune this to roughly the duration of niri's longest window-move animation. Bump it up if you've slowed niri's animations down (e.g. via `animations { window-movement { duration-ms 800; } }` in `config.kdl`); leave it at the default if you use stock niri animations.
 
+### Managed struts
+
+If you'd like the niri tape to automatically contract and expand as panels gain and lose windows, set a `strut` value on the panel(s) you want managed. niri-sidepanels will keep `layout.struts.left` / `layout.struts.right` in your niri `config.kdl` in sync and trigger a config reload after each change.
+
+```toml
+[left]
+strut = 20    # base padding around the left panel, in pixels
+```
+
+Behavior with `strut = N`:
+
+- Panel empty → `layout.struts.<side> = N`. Just the user's base padding; the tape uses the rest of the screen.
+- Panel non-empty → `layout.struts.<side> = N + panel.width`. Tape contracts to leave the panel column visible.
+
+Omit `strut` to leave that side's strut untouched in your niri config — niri-sidepanels won't read or write it. The first time managed struts kick in, your existing niri config is backed up to `~/.config/niri/config.kdl.niri-sidepanels.bak`. Managed lines are tagged with a `// niri-sidepanels: managed` trailing comment so it's obvious which values are tool-controlled.
+
 ### Window rules
 
 Window rules let you customize behavior for specific windows by `app_id` or `title`. Rules are evaluated in order; the first match applies. Omitted fields fall back to the panel's defaults.

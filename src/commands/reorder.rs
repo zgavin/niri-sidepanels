@@ -220,6 +220,16 @@ pub fn reorder<C: NiriClient>(ctx: &mut Ctx<C>) -> Result<()> {
     // so the WLC handler in the daemon process sees the same values that the
     // user-CLI invocation just wrote.
     save_state(&ctx.state, &ctx.cache_dir)?;
+
+    // If the user has opted into managed struts (any side has
+    // `panel.strut = Some(_)`), keep niri's `layout.struts` block in sync
+    // with current panel occupancy. Skips the file I/O entirely if no
+    // side is managed; skips the write+reload if the values haven't
+    // changed since last run. Errors are reported but not propagated —
+    // a stale strut value isn't worth aborting the user's command.
+    if let Err(e) = crate::struts::sync_struts_to_niri_config(ctx) {
+        eprintln!("niri-sidepanels: managed-struts sync failed: {e}");
+    }
     Ok(())
 }
 
@@ -655,6 +665,7 @@ mod tests {
             peek: 10,
             focus_peek: Some(50),
             sticky: false,
+            strut: None,
             margins: crate::config::Margins {
                 top: 50,
                 right: 0,
@@ -707,6 +718,7 @@ mod tests {
             peek: 10,
             focus_peek: Some(50),
             sticky: false,
+            strut: None,
             margins: crate::config::Margins {
                 top: 50,
                 right: 0,

@@ -166,6 +166,18 @@ pub struct Panel {
     pub focus_peek: Option<i32>,
     #[serde(default)]
     pub sticky: bool,
+    /// Optional managed-struts base value. When set, niri-sidepanels will
+    /// keep this side's strut in the user's `niri/config.kdl` in sync with
+    /// the panel's occupancy:
+    ///
+    /// - Empty panel → strut = `strut` (just the user's configured base).
+    /// - Non-empty panel → strut = `strut + panel.width` (so the tape
+    ///   contracts away from the panel windows).
+    ///
+    /// `None` (the field omitted) → niri-sidepanels will not touch this
+    /// side's strut at all. Negative values are allowed (niri permits
+    /// negative struts; they extend the working area past the screen edge).
+    pub strut: Option<i32>,
 }
 
 impl Default for Panel {
@@ -179,6 +191,7 @@ impl Default for Panel {
             peek: default_peek(),
             focus_peek: None,
             sticky: false,
+            strut: None,
         }
     }
 }
