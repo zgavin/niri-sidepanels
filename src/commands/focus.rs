@@ -6,6 +6,7 @@ use anyhow::Result;
 use niri_ipc::Action;
 
 pub fn focus<C: NiriClient>(ctx: &mut Ctx<C>, side: Side, direction: Direction) -> Result<()> {
+    ctx.config.require_enabled(side)?;
     let windows = &ctx.state.panel(side).windows;
     let len = windows.len();
     if len == 0 {
@@ -90,9 +91,12 @@ mod tests_focus {
         state.left.windows.push(ws(10));
         state.right.windows.extend([ws(1), ws(2), ws(3)]);
 
+        let mut config = mock_config();
+        config.left.enabled = true;
+
         let mut ctx = Ctx {
             state,
-            config: mock_config(),
+            config,
             socket: mock,
             cache_dir: temp_dir.path().to_path_buf(),
         };
@@ -146,6 +150,26 @@ mod tests_focus {
         };
 
         focus(&mut ctx, Side::Right, Direction::Next).unwrap();
+        assert!(ctx.socket.sent_actions.is_empty());
+    }
+
+    #[test]
+    fn test_focus_errors_on_disabled_side() {
+        // Given: the left panel is disabled in mock_config.
+        let temp_dir = tempdir().unwrap();
+        let mock = MockNiri::new(vec![]);
+        let mut ctx = Ctx {
+            state: AppState::default(),
+            config: mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+
+        // When: we try to cycle focus in the disabled left panel.
+        let result = focus(&mut ctx, Side::Left, Direction::Next);
+
+        // Then: errors without issuing any FocusWindow actions.
+        assert!(result.is_err());
         assert!(ctx.socket.sent_actions.is_empty());
     }
 }

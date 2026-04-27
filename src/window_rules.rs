@@ -58,13 +58,19 @@ pub fn resolve_rule_focus_peek(
 }
 
 /// Return the side to auto-add this window to, if any rule says so.
-/// If the matching rule names a `side`, we use it. Otherwise we fall back to
-/// the right panel if enabled, else left, else None.
+/// If the matching rule names a `side`, we use it (but only if that panel is
+/// enabled — explicit targeting of a disabled panel is treated as "don't
+/// auto-add" rather than silently routing somewhere else). Otherwise we fall
+/// back to the right panel if enabled, else left, else None.
 pub fn resolve_auto_add_side(config: &Config, window: &Window) -> Option<Side> {
     for rule in &config.window_rule {
         if matches_window(&window.app_id, &window.title, rule) && rule.auto_add {
             if let Some(side) = rule.side {
-                return Some(side);
+                return if config.panel(side).enabled {
+                    Some(side)
+                } else {
+                    None
+                };
             }
             if config.right.enabled {
                 return Some(Side::Right);
@@ -132,7 +138,8 @@ mod tests {
 
     #[test]
     fn test_resolve_auto_add_side_explicit() {
-        let config = Config {
+        // Given: a rule explicitly targeting `left`, with the left panel enabled.
+        let mut config = Config {
             window_rule: vec![WindowRule {
                 app_id: Some(Regex::new("test").unwrap()),
                 auto_add: true,
@@ -141,8 +148,40 @@ mod tests {
             }],
             ..Default::default()
         };
+        config.left = Panel {
+            enabled: true,
+            ..Panel::default()
+        };
         let window = mock_window(1, false, false, 1, None);
-        assert_eq!(resolve_auto_add_side(&config, &window), Some(Side::Left));
+
+        // When: we resolve the auto-add side.
+        let resolved = resolve_auto_add_side(&config, &window);
+
+        // Then: the rule's explicit side wins.
+        assert_eq!(resolved, Some(Side::Left));
+    }
+
+    #[test]
+    fn test_resolve_auto_add_side_returns_none_if_explicit_side_disabled() {
+        // Given: a rule explicitly targeting `left`, but left is disabled.
+        let config = Config {
+            window_rule: vec![WindowRule {
+                app_id: Some(Regex::new("test").unwrap()),
+                auto_add: true,
+                side: Some(Side::Left),
+                ..Default::default()
+            }],
+            // left defaults to enabled = false
+            ..Default::default()
+        };
+        let window = mock_window(1, false, false, 1, None);
+
+        // When: we resolve the auto-add side.
+        let resolved = resolve_auto_add_side(&config, &window);
+
+        // Then: we treat this as "don't auto-add" rather than silently routing
+        // to the enabled fallback. Surfaces the config bug to the user.
+        assert_eq!(resolved, None);
     }
 
     #[test]

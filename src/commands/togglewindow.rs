@@ -8,6 +8,7 @@ use anyhow::Result;
 use niri_ipc::{Action, SizeChange, Window};
 
 pub fn toggle_window<C: NiriClient>(ctx: &mut Ctx<C>, side: Side) -> Result<()> {
+    ctx.config.require_enabled(side)?;
     let focused = ctx.socket.get_active_window()?;
 
     match ctx.state.side_of(focused.id) {
@@ -293,5 +294,30 @@ mod tests {
         assert!(actions.iter().any(|a| matches!(a,
             Action::SetWindowHeight { change: SizeChange::SetFixed(600), id: Some(100) }
         )));
+    }
+
+    #[test]
+    fn test_toggle_window_errors_on_disabled_side() {
+        // Given: the left panel is disabled (default in mock_config).
+        let temp_dir = tempdir().unwrap();
+        let win = mock_window(100, true, false, 1, None);
+        let mock = MockNiri::new(vec![win]);
+        let mut ctx = Ctx {
+            state: AppState::default(),
+            config: mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+
+        // When: we try to toggle the focused window into the disabled left panel.
+        let result = toggle_window(&mut ctx, Side::Left);
+
+        // Then: errors before any state mutation. The window stays untracked
+        // and no niri actions are issued — preserves the user's window from
+        // becoming an orphaned float-sized stranded floating window.
+        assert!(result.is_err());
+        assert!(ctx.state.left.windows.is_empty());
+        assert!(ctx.state.right.windows.is_empty());
+        assert!(ctx.socket.sent_actions.is_empty());
     }
 }

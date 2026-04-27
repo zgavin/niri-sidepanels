@@ -43,6 +43,9 @@ impl Target {
 }
 
 pub fn send<C: NiriClient>(ctx: &mut Ctx<C>, target: Target) -> Result<()> {
+    if let Destination::Panel(side) = target.destination() {
+        ctx.config.require_enabled(side)?;
+    }
     let focused = ctx.socket.get_active_window()?;
     let current = ctx.state.side_of(focused.id);
 
@@ -398,5 +401,80 @@ mod tests {
             actions.iter().any(|a| matches!(a, Action::ToggleWindowFloating { id: Some(100) })),
             "send center on a floating untracked window must un-float it"
         );
+    }
+
+    #[test]
+    fn test_send_to_disabled_panel_errors() {
+        // Given: the left panel is disabled in mock_config.
+        let temp_dir = tempdir().unwrap();
+        let win = mock_window(100, true, false, 1, None);
+        let mock = MockNiri::new(vec![win]);
+        let mut ctx = Ctx {
+            state: AppState::default(),
+            config: mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+
+        // When: we try to send a tape window to the disabled left panel.
+        let result = send(&mut ctx, Target::Left);
+
+        // Then: errors without state mutation or niri actions. Important —
+        // before this fix the window would have been toggled to floating and
+        // sized to the panel's width, then orphaned because reorder skips
+        // disabled panels.
+        assert!(result.is_err());
+        assert!(ctx.state.left.windows.is_empty());
+        assert!(ctx.state.right.windows.is_empty());
+        assert!(ctx.socket.sent_actions.is_empty());
+    }
+
+    #[test]
+    fn test_send_to_center_works_with_disabled_panels() {
+        // Given: both panels disabled (a degenerate but valid config).
+        let temp_dir = tempdir().unwrap();
+        let win = mock_window(100, true, true, 1, Some((1.0, 2.0)));
+        let mock = MockNiri::new(vec![win]);
+        let mut config = mock_config();
+        config.right.enabled = false;
+        let mut ctx = Ctx {
+            state: AppState::default(),
+            config,
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+
+        // When: we send a floating untracked window to center.
+        let result = send(&mut ctx, Target::Center);
+
+        // Then: succeeds — center doesn't target a panel, so the disabled
+        // state is irrelevant. The window un-floats back to the tape.
+        assert!(result.is_ok());
+        let actions = &ctx.socket.sent_actions;
+        assert!(actions.iter().any(|a| matches!(a, Action::ToggleWindowFloating { id: Some(100) })));
+    }
+
+    #[test]
+    fn test_send_to_floating_works_with_disabled_panels() {
+        // Given: both panels disabled.
+        let temp_dir = tempdir().unwrap();
+        let win = mock_window(100, true, false, 1, None);
+        let mock = MockNiri::new(vec![win]);
+        let mut config = mock_config();
+        config.right.enabled = false;
+        let mut ctx = Ctx {
+            state: AppState::default(),
+            config,
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+
+        // When: we send a tiled untracked window to floating.
+        let result = send(&mut ctx, Target::Floating);
+
+        // Then: succeeds — floating doesn't target a panel either.
+        assert!(result.is_ok());
+        let actions = &ctx.socket.sent_actions;
+        assert!(actions.iter().any(|a| matches!(a, Action::ToggleWindowFloating { id: Some(100) })));
     }
 }

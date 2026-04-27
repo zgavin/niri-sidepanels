@@ -6,6 +6,7 @@ use niri_ipc::{Action, Window, WorkspaceReferenceArg};
 /// Move this side's tracked windows from a given source workspace to the
 /// currently active workspace.
 pub fn move_from<C: NiriClient>(ctx: &mut Ctx<C>, side: Side, workspace: u64) -> Result<()> {
+    ctx.config.require_enabled(side)?;
     let active_workspace = ctx.socket.get_active_workspace()?.id;
     let windows = ctx.socket.get_windows()?;
     let tracked_ids: Vec<u64> = ctx.state.panel(side).windows.iter().map(|w| w.id).collect();
@@ -109,5 +110,25 @@ mod tests {
         } else {
             panic!("Unexpected action type");
         }
+    }
+
+    #[test]
+    fn test_move_from_errors_on_disabled_side() {
+        // Given: the left panel is disabled (mock_config default).
+        let temp_dir = tempdir().unwrap();
+        let mock = MockNiri::new(vec![]);
+        let mut ctx = Ctx {
+            state: AppState::default(),
+            config: mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+
+        // When: we try to move-from the disabled left panel.
+        let result = move_from(&mut ctx, Side::Left, 5);
+
+        // Then: errors before issuing any niri actions.
+        assert!(result.is_err());
+        assert!(ctx.socket.sent_actions.is_empty());
     }
 }

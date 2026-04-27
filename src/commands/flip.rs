@@ -6,6 +6,7 @@ use crate::state::save_state;
 use anyhow::Result;
 
 pub fn toggle_flip<C: NiriClient>(ctx: &mut Ctx<C>, side: Side) -> Result<()> {
+    ctx.config.require_enabled(side)?;
     let panel_state = ctx.state.panel_mut(side);
     panel_state.is_flipped = !panel_state.is_flipped;
     save_state(&ctx.state, &ctx.cache_dir)?;
@@ -83,9 +84,12 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let mock = MockNiri::new(vec![]);
 
+        let mut config = mock_config();
+        config.left.enabled = true;
+
         let mut ctx = Ctx {
             state: AppState::default(),
-            config: mock_config(),
+            config,
             socket: mock,
             cache_dir: temp_dir.path().to_path_buf(),
         };
@@ -93,5 +97,26 @@ mod tests {
         toggle_flip(&mut ctx, Side::Left).expect("Toggle flip failed");
         assert!(ctx.state.left.is_flipped);
         assert!(!ctx.state.right.is_flipped);
+    }
+
+    #[test]
+    fn test_toggle_flip_errors_on_disabled_side() {
+        // Given: the left panel is disabled in config (mock_config default).
+        let temp_dir = tempdir().unwrap();
+        let mock = MockNiri::new(vec![]);
+        let mut ctx = Ctx {
+            state: AppState::default(),
+            config: mock_config(),
+            socket: mock,
+            cache_dir: temp_dir.path().to_path_buf(),
+        };
+
+        // When: we try to flip the disabled left panel.
+        let result = toggle_flip(&mut ctx, Side::Left);
+
+        // Then: the call returns an error and no state mutates.
+        assert!(result.is_err(), "expected error when flipping a disabled panel");
+        assert!(!ctx.state.left.is_flipped);
+        assert!(ctx.socket.sent_actions.is_empty());
     }
 }
