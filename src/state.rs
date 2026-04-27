@@ -65,6 +65,15 @@ pub struct WindowState {
     /// after the schema change.
     #[serde(default)]
     pub cooldown_until: Option<i64>,
+    /// What `apply_layouts` last asked niri to position this window at.
+    /// Drift detection compares niri's current report against this, *not*
+    /// against a freshly-recomputed expected — that way a recent state
+    /// change (e.g. a sibling was just ejected, changing the panel's
+    /// layout division) doesn't masquerade as user drift on the survivors
+    /// during the brief window before the next apply runs.
+    /// `None` until the first apply_layouts touches this window.
+    #[serde(default)]
+    pub last_applied: Option<crate::ExpectedLayout>,
 }
 
 pub fn get_default_cache_dir() -> Result<PathBuf> {
@@ -111,6 +120,7 @@ mod tests {
             is_floating: false,
             position: None,
             cooldown_until: None,
+            last_applied: None,
         };
         let w2 = WindowState {
             id: 200,
@@ -119,6 +129,7 @@ mod tests {
             is_floating: true,
             position: Some((1.0, 2.0)),
             cooldown_until: None,
+            last_applied: None,
         };
 
         let original_state = AppState {
@@ -175,6 +186,7 @@ mod tests {
             is_floating: false,
             position: None,
             cooldown_until: None,
+            last_applied: None,
         });
         state.right.windows.push(WindowState {
             id: 2,
@@ -183,6 +195,7 @@ mod tests {
             is_floating: false,
             position: None,
             cooldown_until: None,
+            last_applied: None,
         });
 
         assert_eq!(state.side_of(1), Some(Side::Left));

@@ -58,6 +58,7 @@ mod tests_close {
             is_floating: false,
             position: None,
             cooldown_until: None,
+            last_applied: None,
         });
 
         let mut ctx = Ctx {
@@ -90,6 +91,7 @@ mod tests_close {
             is_floating: false,
             position: None,
             cooldown_until: None,
+            last_applied: None,
         });
         state.right.windows.push(WindowState {
             id: 20,
@@ -98,6 +100,7 @@ mod tests_close {
             is_floating: false,
             position: None,
             cooldown_until: None,
+            last_applied: None,
         });
 
         let mut ctx = Ctx {
@@ -135,6 +138,7 @@ mod tests_close {
             is_floating: false,
             position: None,
             cooldown_until: None,
+            last_applied: None,
         });
 
         let mut ctx = Ctx {

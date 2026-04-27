@@ -2,7 +2,7 @@ use crate::config::{Config, Panel, Side, WindowRule};
 use crate::niri::NiriClient;
 use crate::state::{AppState, PanelState, save_state};
 use crate::window_rules::{resolve_rule_focus_peek, resolve_rule_peek, resolve_window_size};
-use crate::{Ctx, WindowTarget};
+use crate::{Ctx, ExpectedLayout, WindowTarget};
 use anyhow::Result;
 use niri_ipc::{Action, PositionChange, SizeChange, Window, WindowLayout};
 use std::collections::HashSet;
@@ -28,18 +28,6 @@ const MIN_WINDOW_HEIGHT: i32 = 80;
 /// resize rather than our own echo. Sub-pixel noise stays below this; any
 /// real drag (~several pixels minimum) clears it.
 pub(crate) const LAYOUT_TOLERANCE_PX: f64 = 1.0;
-
-/// What the daemon thinks a panel window should look like right now. Computed
-/// from config + state + niri's current window list. Used both as the source
-/// of truth that `reorder` applies, and as the "expected" side of the
-/// comparison when a `WindowLayoutsChanged` event arrives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ExpectedLayout {
-    pub x: i32,
-    pub y: i32,
-    pub width: i32,
-    pub height: i32,
-}
 
 /// Result of comparing a niri-reported layout against the daemon's expected
 /// layout for a panel window.
@@ -134,6 +122,76 @@ pub fn reorder<C: NiriClient>(ctx: &mut Ctx<C>) -> Result<()> {
         let before = panel_state.windows.len();
         panel_state.windows.retain(|w| active_ids.contains(&w.id));
         if panel_state.windows.len() != before {
+            dirty = true;
+        }
+    }
+
+    // Drift-eject pass: any panel-tracked window whose niri-reported layout
+    // diverges from what we'd compute is treated as a user-moved window and
+    // ejected from panel tracking — *unless* it's still in its post-reorder
+    // cooldown, in which case the divergence is our own animation in flight.
+    //
+    // niri does not emit `WindowLayoutsChanged` for interactive (mouse)
+    // floating drags (its IPC layout uses settled `logical_pos`, skipping
+    // the animated render offset to avoid IPC spam). So the WLC handler
+    // alone misses drag-driven drifts and we have to do this check on every
+    // reorder pass to catch them.
+    let now = now_ms();
+    for side in Side::ALL {
+        let mut to_eject: Vec<u64> = Vec::new();
+        let mut layouts = Vec::new();
+        compute_layout_for_side(
+            &ctx.config,
+            &ctx.state,
+            side,
+            &all_windows,
+            current_ws,
+            (display_w, display_h),
+            &mut layouts,
+        );
+        for (id, _expected) in &layouts {
+            let Some(window) = all_windows.iter().find(|w| w.id == *id) else {
+                continue;
+            };
+            let w_state = ctx
+                .state
+                .panel(side)
+                .windows
+                .iter()
+                .find(|w| w.id == *id);
+            let cooldown = w_state.and_then(|w| w.cooldown_until);
+            let last_applied = w_state.and_then(|w| w.last_applied);
+            // Skip drift-eject when we have no `last_applied` baseline to
+            // compare against (window not yet positioned by us) or when the
+            // window is still settling from a recent reorder pass.
+            //
+            // Comparing against `last_applied` rather than the freshly
+            // computed expected matters for the case where a sibling was
+            // just ejected: the survivors' freshly-recomputed expected
+            // changes (panel re-divides), but their actual reported layout
+            // still matches what we last applied — which means *no user
+            // drift has happened*, just the layout-recomputation lag.
+            let Some(baseline) = last_applied else {
+                continue;
+            };
+            let is_settling = cooldown.is_some_and(|d| d > now);
+            if is_settling {
+                continue;
+            }
+            if matches!(check_layout(&baseline, &window.layout), LayoutCheck::Drift) {
+                println!(
+                    "Panel {:?} window {} drifted from expected layout. Ejecting.",
+                    side, id
+                );
+                to_eject.push(*id);
+            }
+        }
+        if !to_eject.is_empty() {
+            let panel_state = ctx.state.panel_mut(side);
+            panel_state.windows.retain(|w| !to_eject.contains(&w.id));
+            for id in to_eject {
+                ctx.state.ignored_windows.push(id);
+            }
             dirty = true;
         }
     }
@@ -325,9 +383,10 @@ fn reorder_side<C: NiriClient>(
             }
             if let Some(w) = panel_state.windows.iter_mut().find(|w| w.id == *id) {
                 w.cooldown_until = Some(cooldown_end);
+                w.last_applied = Some(*expected);
                 eprintln!(
                     "[reorder] side={side:?} id={id}: cooldown set until {cooldown_end} \
-                     ({}ms from now)",
+                     ({}ms from now), last_applied={expected:?}",
                     ctx.config.animation.cooldown_ms
                 );
             }
@@ -362,6 +421,7 @@ mod tests {
             is_floating: false,
             position: None,
             cooldown_until: None,
+            last_applied: None,
         }
     }
 

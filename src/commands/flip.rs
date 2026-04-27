@@ -40,6 +40,7 @@ mod tests {
                         is_floating: true,
                         position: None,
                         cooldown_until: None,
+                        last_applied: None,
                     },
                     WindowState {
                         id: 2,
@@ -48,6 +49,7 @@ mod tests {
                         is_floating: true,
                         position: Some((1.0, 2.0)),
                         cooldown_until: None,
+                        last_applied: None,
                     },
                 ],
                 is_hidden: false,

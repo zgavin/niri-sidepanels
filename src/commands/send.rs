@@ -112,6 +112,7 @@ mod tests {
             is_floating: false,
             position: None,
             cooldown_until: None,
+            last_applied: None,
         }
     }
 
@@ -154,6 +155,7 @@ mod tests {
             is_floating: true,
             position: Some((1.0, 2.0)),
             cooldown_until: None,
+            last_applied: None,
         });
 
         let mut ctx = Ctx {
@@ -264,6 +266,7 @@ mod tests {
             is_floating: true,
             position: Some((5.0, 6.0)),
             cooldown_until: None,
+            last_applied: None,
         });
 
         let mut ctx = Ctx {
@@ -298,6 +301,7 @@ mod tests {
             is_floating: false,
             position: None,
             cooldown_until: None,
+            last_applied: None,
         });
 
         let mut ctx = Ctx {

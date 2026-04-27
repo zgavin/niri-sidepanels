@@ -52,6 +52,7 @@ mod tests_focus {
             is_floating: true,
             position: None,
             cooldown_until: None,
+            last_applied: None,
         }
     }
 
